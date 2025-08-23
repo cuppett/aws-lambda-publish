@@ -35,9 +35,9 @@ aws cloudformation deploy --template-file infra/pipeline.yaml --stack-name lambd
 
 ### Core Components
 - **Controller Lambda** (`src/controller/`): Main orchestrator triggered by ECR EventBridge events
-- **Monitor Lambda** (`src/monitor/`): Scheduled function that polls pipeline/CodeDeploy status
+- **Monitor Lambda** (`src/monitor/`): Scheduled function (every 5 minutes) that polls pipeline/CodeDeploy status and updates DynamoDB
 - **DynamoDB Table**: `ImageTagSubscriptions` stores repo:tag -> Lambda function mappings
-- **EventBridge Rule**: Triggers controller on ECR PUSH events
+- **EventBridge Rules**: Trigger controller on ECR PUSH events, trigger monitor on schedule
 
 ### Key Services Architecture
 - **Config** (`src/controller/services/config.py`): Environment variable management with defaults
@@ -99,12 +99,45 @@ Environment variables are centralized in `Config` class with sensible defaults:
 
 ## Testing Strategy
 
+### Unit Testing
 - Unit tests use pytest + moto for AWS service mocking
 - DynamoDB marshalling, ECR digest resolution, and Lambda update flows are tested
 - Botocore Stubber used for complex Lambda client interactions
-- End-to-end testing requires real AWS resources
+
+### Local Testing Commands
+```bash
+# Test controller locally with mock events
+export AWS_PROFILE=<profile> AWS_REGION=<region> TABLE_NAME=ImageTagSubscriptions
+python3 -c "
+import sys; sys.path.append('src')
+from controller.lambda_handler import handler
+# Pass test event to handler function
+"
+
+# Test specific service components
+python3 -c "
+import sys; sys.path.append('src')  
+from controller.services.ddb_client import DDBClient
+# Test DynamoDB operations directly
+"
+```
+
+### Live Testing Requirements
+- Requires real AWS resources: ECR repository, Lambda functions, DynamoDB table
+- Deploy test infrastructure before running end-to-end tests
+- Use separate AWS account/region for testing to avoid conflicts
 
 ## Key Implementation Details
+
+### Region Handling Critical Issue
+**IMPORTANT**: All DynamoDB clients must specify the target region explicitly. The system was initially designed to work across regions, but DynamoDB clients default to us-east-1 if region is not specified. Always pass `region` parameter to `DDBClient()` constructor.
+
+### Lambda URI Resolution
+The `LambdaClient.get_current_image_digest()` method handles both:
+- Digest-based URIs: `account.dkr.ecr.region.amazonaws.com/repo@sha256:...` 
+- Tag-based URIs: `account.dkr.ecr.region.amazonaws.com/repo:tag` (resolved via ECR)
+
+This is critical for idempotency checks when Lambda functions use tag-based ImageURIs instead of digest-based ones.
 
 ### Idempotency
 Uses DynamoDB conditional updates: `SET lastProcessedDigest = :d IF attribute_not_exists OR <> :d`
@@ -117,3 +150,24 @@ Comprehensive CloudWatch metrics track failures at component level with structur
 
 ### Concurrent Processing
 ThreadPoolExecutor limits parallel target processing to `MAX_PARALLEL_TARGETS` to prevent overwhelming downstream services
+
+## Production Deployment Considerations
+
+### CodeDeploy Deployment Groups
+Lambda deployment groups cannot be reliably created via CloudFormation. Create them manually:
+```bash
+aws deploy create-deployment-group \
+  --application-name <app-name> \
+  --deployment-group-name <group-name> \
+  --service-role-arn <role-arn> \
+  --deployment-style '{"deploymentType":"BLUE_GREEN","deploymentOption":"WITH_TRAFFIC_CONTROL"}'
+```
+
+### Pipeline Infrastructure
+The pipeline template creates a working CodePipeline but requires manual setup of:
+- Source stage artifact (the template uses a placeholder S3 source)
+- S3 bucket versioning for artifact storage
+- Proper buildspec that retrieves variables from SSM Parameter Store
+
+### Monitoring Setup
+Monitor Lambda runs every 5 minutes via EventBridge schedule rule. Check CloudWatch Logs group `/aws/lambda/lambda-publish-monitor` for execution details.
