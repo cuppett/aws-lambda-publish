@@ -53,7 +53,7 @@ def handler(event, context):
             metrics.increment_counter("DigestResolutionFailures", {"Repository": repository, "Tag": image_tag})
             return {"status": "error", "reason": "no_digest"}
 
-        ddb = DDBClient(table_name=config.table_name)
+        ddb = DDBClient(table_name=config.table_name, region=region)
         pk = f"REG#{registry_id}#REPO#{repository}#TAG#{image_tag}"
         targets = ddb.get_targets(pk)
         if not targets:
@@ -124,7 +124,7 @@ def process_target(target_item, repository, digest, registry_id, hub_region, pk,
             new_digest = image_uri.split('@', 1)[1]
             
             # Idempotency check
-            ok = ddb_conditional_set(pk, sk, new_digest)
+            ok = ddb_conditional_set(pk, sk, new_digest, region)
             if not ok:
                 logger.info(json.dumps({
                     "msg": "skipping_already_processed",
@@ -137,7 +137,7 @@ def process_target(target_item, repository, digest, registry_id, hub_region, pk,
             
             res = with_retries(lambda: lc.update_function_direct(function_name, image_uri, alias, config.default_update_strategy))
             status = res.get("status")
-            DDBClient(table_name=config.table_name).update_last_processed(pk, sk, new_digest, status)
+            DDBClient(table_name=config.table_name, region=region).update_last_processed(pk, sk, new_digest, status)
             metrics.record_updated_function(repository, sk.split('#')[-1], mode, status)
             return res
         else:
@@ -164,7 +164,7 @@ def process_target(target_item, repository, digest, registry_id, hub_region, pk,
             res = with_retries(lambda: pc.start_pipeline(pipeline_name, vars))
             execution_id = res.get("executionId")
             status = res.get("status", "unknown")
-            DDBClient(table_name=config.table_name).record_pipeline_execution(pk, sk, execution_id or "", status)
+            DDBClient(table_name=config.table_name, region=region).record_pipeline_execution(pk, sk, execution_id or "", status)
             metrics.record_pipeline_start(repository, sk.split('#')[-1], status)
             return res
     except Exception as e:
@@ -183,5 +183,5 @@ def with_retries(fn, retries=3, base_delay=0.5):
             time.sleep(base_delay * (2 ** i))
 
 
-def ddb_conditional_set(pk, sk, digest):
-    return DDBClient(table_name=config.table_name).conditional_set_processed(pk, sk, digest)
+def ddb_conditional_set(pk, sk, digest, region=None):
+    return DDBClient(table_name=config.table_name, region=region).conditional_set_processed(pk, sk, digest)

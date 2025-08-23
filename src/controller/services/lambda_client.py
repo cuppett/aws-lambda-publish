@@ -39,8 +39,34 @@ class LambdaClient:
                 logger.debug(f"Current digest for {function_name}: {digest}")
                 return digest
             elif uri and ':' in uri:
-                # Handle tag-based URIs (though Lambda should use digest)
-                logger.warning(f"Function {function_name} uses tag-based URI: {uri}")
+                # Handle tag-based URIs by resolving via ECR
+                logger.info(f"Function {function_name} uses tag-based URI: {uri}")
+                try:
+                    # Parse the URI to extract ECR details
+                    # Format: account.dkr.ecr.region.amazonaws.com/repo:tag
+                    if '.dkr.ecr.' in uri and '.amazonaws.com/' in uri:
+                        parts = uri.split('/')
+                        if len(parts) >= 2:
+                            host_part = parts[0]  # account.dkr.ecr.region.amazonaws.com
+                            repo_and_tag = '/'.join(parts[1:])  # repo:tag
+                            
+                            if ':' in repo_and_tag:
+                                repo, tag = repo_and_tag.rsplit(':', 1)
+                                account_id = host_part.split('.')[0]
+                                region = host_part.split('.')[3]
+                                
+                                # Use ECR client to resolve tag to digest
+                                from .ecr_client import ECRClient
+                                ecr_client = ECRClient(region=region)
+                                resolved_digest = ecr_client.get_digest(repo, tag, account_id)
+                                if resolved_digest:
+                                    logger.debug(f"Resolved tag {tag} to digest {resolved_digest} for {function_name}")
+                                    return resolved_digest
+                                else:
+                                    logger.warning(f"Could not resolve tag {tag} for repo {repo}")
+                                    return None
+                except Exception as e:
+                    logger.warning(f"Failed to resolve tag-based URI for {function_name}: {e}")
                 return None
             else:
                 logger.warning(f"Unexpected ImageUri format for {function_name}: {uri}")

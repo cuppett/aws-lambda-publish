@@ -10,6 +10,12 @@ Parameters:
   UseBuildForPublish:
     Type: String
     Default: "true"
+  ApplicationName:
+    Type: String
+    Default: LambdaPublishTest
+  DeploymentGroupName:
+    Type: String
+    Default: TestGroup
 Conditions:
   CreateBucket: !Equals [!Ref ArtifactBucketName, ""]
 Resources:
@@ -20,13 +26,10 @@ Resources:
   CodeDeployApplication:
     Type: AWS::CodeDeploy::Application
     Properties:
+      ApplicationName: !Ref ApplicationName
       ComputePlatform: Lambda
-  CodeDeployDeploymentGroup:
-    Type: AWS::CodeDeploy::DeploymentGroup
-    Properties:
-      ApplicationName: !Ref CodeDeployApplication
-      DeploymentGroupName: LambdaDG
-      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+# CodeDeploy deployment group for Lambda will be created dynamically by the controller
+  # when creating deployments - CloudFormation doesn't support Lambda deployment groups well
   CodeBuildRole:
     Type: AWS::IAM::Role
     Properties:
@@ -68,7 +71,7 @@ Resources:
                   - s3:PutObject
                   - s3:GetObject
                 Resource: 
-                  - !If [CreateBucket, !Sub '${ArtifactBucket}/*', !Sub 'arn:aws:s3:::${ArtifactBucketName}/*']
+                  - !If [CreateBucket, !Sub 'arn:aws:s3:::${ArtifactBucket}/*', !Sub 'arn:aws:s3:::${ArtifactBucketName}/*']
   CodeBuildProject:
     Type: AWS::CodeBuild::Project
     Properties:
@@ -200,8 +203,8 @@ Resources:
                   - s3:PutObject
                   - s3:GetBucketVersioning
                 Resource: 
-                  - !If [CreateBucket, !Sub '${ArtifactBucket}/*', !Sub 'arn:aws:s3:::${ArtifactBucketName}/*']
-                  - !If [CreateBucket, !Ref ArtifactBucket, !Sub 'arn:aws:s3:::${ArtifactBucketName}']
+                  - !If [CreateBucket, !Sub 'arn:aws:s3:::${ArtifactBucket}/*', !Sub 'arn:aws:s3:::${ArtifactBucketName}/*']
+                  - !If [CreateBucket, !Sub 'arn:aws:s3:::${ArtifactBucket}', !Sub 'arn:aws:s3:::${ArtifactBucketName}']
   CodePipeline:
     Type: AWS::CodePipeline::Pipeline
     Properties:
@@ -250,7 +253,7 @@ Resources:
                 Version: '1'
               Configuration:
                 ApplicationName: !Ref CodeDeployApplication
-                DeploymentGroupName: !Ref CodeDeployDeploymentGroup
+                DeploymentGroupName: !Ref DeploymentGroupName
               InputArtifacts:
                 - Name: BuildOutput
               RunOrder: 1
