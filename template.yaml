@@ -4,11 +4,17 @@ Description: SAM template for aws-lambda-publish
 Globals:
   Function:
     Timeout: 120
-    Runtime: python3.12
+    Runtime: python3.13
     MemorySize: 512
     Environment:
       Variables:
         TABLE_NAME: ImageTagSubscriptions
+        DEFAULT_MODE: direct
+        DEFAULT_UPDATE_STRATEGY: publish-and-alias
+        MAX_PARALLEL_TARGETS: 10
+        LOG_LEVEL: INFO
+        METRICS_NAMESPACE: LambdaPublish
+        ASSUME_ROLE_SESSION_NAME: lambda-publish
 
 Resources:
   ControllerFunction:
@@ -36,11 +42,28 @@ Resources:
             - Effect: Allow
               Action:
                 - codepipeline:StartPipelineExecution
+                - codepipeline:GetPipelineExecution
+                - codepipeline:GetPipelineState
+                - codedeploy:GetDeployment
+                - codedeploy:ListDeployments
                 - sts:AssumeRole
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - ssm:PutParameter
+                - ssm:GetParameter
+                - ssm:GetParameters
+                - ssm:GetParametersByPath
+                - ssm:DeleteParameter
+              Resource: 
+                - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/lambda-publish/*'
+            - Effect: Allow
+              Action:
+                - cloudwatch:PutMetricData
               Resource: '*'
       Events:
         EcrPush:
-          Type: Rule
+          Type: EventBridgeRule
           Properties:
             Pattern:
               source:
@@ -74,8 +97,34 @@ Resources:
       Handler: src.monitor.lambda_handler.handler
       CodeUri: .
       Policies:
-        - DynamoDBReadPolicy:
+        - DynamoDBCrudPolicy:
             TableName: ImageTagSubscriptions
+        - Statement:
+            - Effect: Allow
+              Action:
+                - codepipeline:GetPipelineExecution
+                - codepipeline:GetPipelineState
+                - codedeploy:GetDeployment
+                - codedeploy:ListDeployments
+                - sts:AssumeRole
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - cloudwatch:PutMetricData
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - ssm:GetParameter
+                - ssm:GetParameters
+                - ssm:GetParametersByPath
+              Resource: 
+                - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/lambda-publish/*'
+      Events:
+        ScheduleRule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Name: monitor-pipeline-status
 
 Outputs:
   ControllerFunctionName:

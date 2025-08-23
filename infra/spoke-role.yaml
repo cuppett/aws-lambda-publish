@@ -28,11 +28,19 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
+                  - lambda:GetFunction
                   - lambda:GetFunctionConfiguration
                   - lambda:UpdateFunctionCode
                   - lambda:PublishVersion
                   - lambda:UpdateAlias
                   - lambda:CreateAlias
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
                 Resource: "*"
   PipelineStarterRole:
     Type: AWS::IAM::Role
@@ -54,7 +62,18 @@ Resources:
               - Effect: Allow
                 Action:
                   - codepipeline:StartPipelineExecution
+                  - codepipeline:GetPipelineExecution
+                  - codepipeline:GetPipelineState
                 Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                  - ssm:PutParameter
+                  - ssm:DeleteParameter
+                Resource: 
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/lambda-publish/*'
   MonitorRole:
     Type: AWS::IAM::Role
     Properties:
@@ -75,9 +94,18 @@ Resources:
               - Effect: Allow
                 Action:
                   - codepipeline:GetPipelineExecution
+                  - codepipeline:GetPipelineState
                   - codedeploy:GetDeployment
+                  - codedeploy:ListDeployments
                   - cloudwatch:GetMetricData
                 Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource: 
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/lambda-publish/*'
 Outputs:
   DeploymentRoleArn:
     Value: !GetAtt DeploymentRole.Arn

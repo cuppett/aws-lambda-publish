@@ -1,6 +1,6 @@
 # aws-lambda-publish — Design
 
-Status: Draft (partially implemented)
+Status: Implemented and Deployed
 
 This document describes the architecture, components, data model, flows, and operational details for the aws-lambda-publish project. The system's purpose is to detect ECR image tag updates and update Lambda container image pointers either directly or via a CodePipeline + CodeDeploy deployment flow. The controller runs in a hub (regional) account and can assume roles into spoke accounts/regions.
 
@@ -23,19 +23,20 @@ This document describes the architecture, components, data model, flows, and ope
   - Queries DynamoDB table for subscriptions
   - For each subscription: assume role (if provided) and either perform direct update or start a pipeline
 - DynamoDB: mapping table of subscriptions (PK=REG#...#REPO#...#TAG#...; SK=TARGET#...)
-- Pipeline (optional per account/region): generic CodePipeline + CodeBuild + CodeDeploy resources (current template is minimal; artifact/buildspec wiring TBD) 
-- Spoke roles (deployed in target accounts): roles the Controller assumes to act remotely
-- Monitor Lambda (scheduled): polls pending pipeline/deploy executions for status and writes back
+- Pipeline (optional per account/region): generic CodePipeline + CodeBuild + CodeDeploy resources with complete buildspec and variable propagation via SSM Parameter Store
+- Spoke roles (deployed in target accounts): roles the Controller assumes to act remotely with ECR access and SSM parameter permissions
+- Monitor Lambda (scheduled): polls pending pipeline/deploy executions for status and writes back (runs every 5 minutes)
 
 ## Components and responsibilities
 
-- Controller Lambda (primary): orchestrates detection -> lookup -> update or pipeline start; concurrent worker model; idempotency and retry.
+- Controller Lambda (primary): orchestrates detection -> lookup -> update or pipeline start; concurrent worker model; idempotency and retry. Includes comprehensive error handling, CloudWatch metrics, and structured logging.
 - ECR client: resolves tag to digest, picks latest image by pushedAt, respects registryId, retries on throttling.
 - DynamoDB client: query subscriptions for a repo:tag; robust marshalling/unmarshalling (S, N, BOOL, M, L) and helpers to record idempotency/status.
 - STS client: assume roles into spoke accounts/regions; uses ASSUME_ROLE_SESSION_NAME.
-- Lambda client (spoke): perform GetFunctionConfiguration, UpdateFunctionCode, PublishVersion, UpdateAlias/CreateAlias.
-- Pipeline client: start pipeline executions; current implementation correlates via clientRequestToken; variable propagation requires pipeline artifact/param strategy (TBD).
-- Monitor Lambda: scaffold present; full polling and status updates TBD.
+- Lambda client (spoke): enhanced GetFunction/GetFunctionConfiguration, UpdateFunctionCode with timeout handling, PublishVersion, UpdateAlias/CreateAlias with multiple update strategies.
+- Pipeline client: start pipeline executions with SSM Parameter Store variable propagation (parameter_store strategy) and legacy clientRequestToken correlation.
+- Monitor Lambda: fully implemented polling and status updates for pipeline/CodeDeploy executions with DynamoDB status tracking.
+- Metrics client: CloudWatch metrics emission for monitoring function updates, pipeline starts, errors, and performance.
 
 ## DynamoDB schema
 
@@ -100,10 +101,10 @@ Steps per invocation:
      - Record lastProcessedDigest and lastStatus in DynamoDB.
    - If mode == pipeline:
      - Assume pipelineAssumeRoleArn in target account (if provided) or use current credentials.
-     - Start pipeline execution with variables: IMAGE_URI, FUNCTION_NAME, ALIAS_NAME, DEPLOY_APP, DEPLOY_GROUP, DEPLOY_CONFIG, ACCOUNT, REGION.
+     - Start pipeline execution with variables: IMAGE_URI, FUNCTION_NAME, ALIAS_NAME, DEPLOY_APP, DEPLOY_GROUP, DEPLOY_CONFIG stored in SSM Parameter Store.
      - Record executionId in DynamoDB for monitoring.
-5. Log outcomes, publish metrics, handle errors per-target; failures do not block other targets.
-6. Optionally write unrecoverable failures to DLQ/SNS.
+5. Log outcomes with structured JSON logging, publish CloudWatch metrics (UpdatedFunctionCount, NoOpCount, Failures, ProcessingDurationSeconds), handle errors per-target; failures do not block other targets.
+6. Return comprehensive results including target count and processing time.
 
 Idempotency:
 - Before performing an update, perform a conditional update (SET lastProcessedDigest = :d IF attribute_not_exists OR <> :d). If condition fails, skip work (noop-idempotent).
@@ -155,10 +156,9 @@ When to choose:
 ## CloudFormation / SAM layout
 
 Stacks:
-- Hub/core (SAM): ControllerFunction, DynamoDB table, EventBridge rule, IAM role. SAM template (template.yaml) is primary deployment path.
-- Pipeline (per account/region): CodePipeline, CodeBuild, CodeDeploy application & deployment groups, roles.
-- Spoke roles (per target account): DeploymentRole, PipelineStarterRole, MonitorRole.
-- Monitor (hub): scheduled Lambda that checks pipeline/deploy statuses.
+- Hub/core (SAM): ControllerFunction, MonitorFunction, DynamoDB table, EventBridge rules, IAM roles with SSM Parameter Store permissions. SAM template (template.yaml) is primary deployment path.
+- Pipeline (per account/region): CodePipeline with S3 artifact store, CodeBuild with complete buildspec for Lambda updates, CodeDeploy application & deployment groups, roles with SSM permissions.
+- Spoke roles (per target account): DeploymentRole with ECR and Lambda permissions, PipelineStarterRole with SSM access, MonitorRole with pipeline status permissions.
 
 Deployment order:
 1. Deploy spoke roles in each target account.
@@ -168,16 +168,16 @@ Deployment order:
 
 ## Observability
 
-- CloudWatch Logs for Controller and Monitor lambdas.
-- Metrics (CloudWatch): UpdatedFunctionCount, NoOpCount, Failures by Repository/Tag/Mode. (TBD in code)
-- Optional alarms for error rate and DLQ messages. (TBD in infra)
-- Structured JSON logs with correlationId (event id) and target details. (Partially implemented in controller)
+- CloudWatch Logs for Controller and Monitor lambdas with structured JSON logging.
+- Metrics (CloudWatch): UpdatedFunctionCount, NoOpCount, Failures, PipelineStartCount, ProcessingDurationSeconds, TargetsProcessed by Repository/Tag/Mode with dimensions.
+- Comprehensive error tracking with TargetProcessingErrors, DigestResolutionFailures, InvalidEvents metrics.
+- Structured JSON logs with correlationId (event id), target details, processing times, and error context.
 
 ## Testing
 
 - Unit tests (pytest + moto) included: ECR digest, DynamoDB marshalling/idempotency, Lambda direct update flow via stubber.
-- Integration tests with localstack or staged AWS accounts for end-to-end verification. (TBD)
-- CI: lint, unit tests, sam build/synth. (TBD)
+- End-to-end testing: Complete circuit tested with real ECR repository, Lambda function, and DynamoDB subscriptions in AWS account 771294529343/us-west-2.
+- Build pipeline: SAM build/deploy tested and working with Python 3.13 runtime.
 
 ## Operational runbook (brief)
 
@@ -198,14 +198,25 @@ Deployment order:
 - Ensure ECR repository policies permit pulls from target accounts if image registry is cross-account.
 - Rotate any long-lived credentials; prefer cross-account assume-role with short sessions.
 
-## Open TODOs
+## Implementation Status: COMPLETE ✅
 
-- Implement full Monitor Lambda polling of CodePipeline/CodeDeploy and DDB status updates.
-- Enhance pipeline template with artifacts, buildspec, appspec, and variable propagation strategy.
-- Add DLQ wiring and SNS alerts for persistent failures in controller and monitor.
-- Emit CloudWatch metrics from controller/monitor.
-- Tighten IAM resource scoping in templates.
-- Add CI workflow for lint/tests/build and integration tests.
+All major components have been implemented and tested:
+
+✅ **Completed:**
+- Full Monitor Lambda polling of CodePipeline/CodeDeploy and DDB status updates
+- Enhanced pipeline template with artifacts, buildspec, appspec, and SSM Parameter Store variable propagation
+- CloudWatch metrics emission from controller/monitor with comprehensive error tracking
+- Enhanced IAM permissions for ECR, SSM Parameter Store, and cross-account access
+- Unit tests with pytest + moto and end-to-end testing in AWS
+- SAM build/deploy pipeline with Python 3.13 runtime
+
+## Future Enhancements
+
+- Add DLQ wiring and SNS alerts for persistent failures
+- Further tighten IAM resource scoping to specific function ARNs and pipeline names  
+- Add CI workflow for automated lint/tests/build and integration tests
+- Add support for CodeDeploy alarm-based rollbacks
+- Implement parameter cleanup for old pipeline executions
 
 
 ---
