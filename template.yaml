@@ -1,0 +1,84 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: SAM template for aws-lambda-publish
+Globals:
+  Function:
+    Timeout: 120
+    Runtime: python3.12
+    MemorySize: 512
+    Environment:
+      Variables:
+        TABLE_NAME: ImageTagSubscriptions
+
+Resources:
+  ControllerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: lambda-publish-controller
+      Handler: src.controller.lambda_handler.handler
+      CodeUri: .
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: ImageTagSubscriptions
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ecr:DescribeImages
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - lambda:GetFunctionConfiguration
+                - lambda:UpdateFunctionCode
+                - lambda:PublishVersion
+                - lambda:UpdateAlias
+                - lambda:CreateAlias
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - codepipeline:StartPipelineExecution
+                - sts:AssumeRole
+              Resource: '*'
+      Events:
+        EcrPush:
+          Type: Rule
+          Properties:
+            Pattern:
+              source:
+                - aws.ecr
+              detail-type:
+                - 'ECR Image Action'
+              detail:
+                action-type:
+                  - PUSH
+
+  ImageTagSubscriptionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ImageTagSubscriptions
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+
+  MonitorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: lambda-publish-monitor
+      Handler: src.monitor.lambda_handler.handler
+      CodeUri: .
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: ImageTagSubscriptions
+
+Outputs:
+  ControllerFunctionName:
+    Value: !Ref ControllerFunction
+  TableName:
+    Value: !Ref ImageTagSubscriptionsTable

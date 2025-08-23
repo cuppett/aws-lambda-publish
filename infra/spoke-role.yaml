@@ -1,0 +1,87 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "Spoke account roles that the hub may assume for deployments and pipeline starts"
+Parameters:
+  HubAccountId:
+    Type: String
+  TrustedHubRoleArn:
+    Type: String
+    Default: ""
+Conditions:
+  UseRoleArn: !Not [!Equals [!Ref TrustedHubRoleArn, ""]]
+Resources:
+  DeploymentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: HubDeploymentRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !If [UseRoleArn, !Ref TrustedHubRoleArn, !Sub arn:aws:iam::${HubAccountId}:root]
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: DeploymentPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:GetFunctionConfiguration
+                  - lambda:UpdateFunctionCode
+                  - lambda:PublishVersion
+                  - lambda:UpdateAlias
+                  - lambda:CreateAlias
+                Resource: "*"
+  PipelineStarterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: HubPipelineStarterRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref HubAccountId
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: StartPipeline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codepipeline:StartPipelineExecution
+                Resource: "*"
+  MonitorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: HubMonitorRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref HubAccountId
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: MonitorPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codepipeline:GetPipelineExecution
+                  - codedeploy:GetDeployment
+                  - cloudwatch:GetMetricData
+                Resource: '*'
+Outputs:
+  DeploymentRoleArn:
+    Value: !GetAtt DeploymentRole.Arn
+  PipelineStarterRoleArn:
+    Value: !GetAtt PipelineStarterRole.Arn
+  MonitorRoleArn:
+    Value: !GetAtt MonitorRole.Arn
