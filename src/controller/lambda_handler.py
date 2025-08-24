@@ -54,7 +54,7 @@ def handler(event, context):
             return {"status": "error", "reason": "no_digest"}
 
         ddb = DDBClient(table_name=config.table_name, region=region)
-        pk = f"REG#{registry_id}#REPO#{repository}#TAG#{image_tag}"
+        pk = f"{repository}:{image_tag}"
         targets = ddb.get_targets(pk)
         if not targets:
             logger.info(json.dumps({"msg": "no targets", "pk": pk, "correlationId": correlation_id}))
@@ -101,7 +101,7 @@ def process_target(target_item, repository, digest, registry_id, hub_region, pk,
     function_name = target.get("functionName")
     alias = target.get("aliasName")
     assume_role = target_item.get("assumeRoleArn") or target.get("assumeRoleArn")
-    sk = target_item.get("SK") or f"TARGET#{region}#{target.get('accountId', '')}#{function_name}"
+    sk = target_item.get("SK") or f"{target.get('accountId', '')}/{region}/{function_name}"
 
     logger.info(json.dumps({
         "msg": "processing_target",

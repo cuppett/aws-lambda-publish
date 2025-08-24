@@ -27,8 +27,8 @@ def test_ddb_marshalling_and_idempotency():
         AttributeDefinitions=[{'AttributeName': 'PK', 'AttributeType': 'S'}, {'AttributeName': 'SK', 'AttributeType': 'S'}],
         KeySchema=[{'AttributeName': 'PK', 'KeyType': 'HASH'}, {'AttributeName': 'SK', 'KeyType': 'RANGE'}],
     )
-    pk = 'REG#123#REPO#orders#TAG#prod'
-    sk = 'TARGET#us-east-1#111#orders-fn'
+    pk = 'orders:prod'
+    sk = '111/us-east-1/orders-fn'
     _put_ddb_item(dynamodb, table, {
         'PK': {'S': pk},
         'SK': {'S': sk},

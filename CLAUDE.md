@@ -60,7 +60,7 @@ aws cloudformation deploy --template-file infra/pipeline.yaml --stack-name lambd
 
 1. ECR image push → EventBridge → Controller Lambda
 2. Controller resolves tag to digest via ECR DescribeImages
-3. Queries DynamoDB for subscriptions using pattern: `PK=REG#{registryId}#REPO#{repo}#TAG#{tag}`
+3. Queries DynamoDB for subscriptions using pattern: `PK={repo}:{tag}`
 4. For each target, either:
    - Direct: Update Lambda function immediately with idempotency checks
    - Pipeline: Store variables in SSM Parameter Store and start pipeline execution
@@ -69,15 +69,15 @@ aws cloudformation deploy --template-file infra/pipeline.yaml --stack-name lambd
 ## DynamoDB Schema
 
 ```
-PK (HASH): REG#{registryId}#REPO#{repositoryName}#TAG#{imageTag}
-SK (RANGE): TARGET#{region}#{accountId}#{functionName}
+PK (HASH): {repositoryName}:{imageTag}
+SK (RANGE): {accountId}/{region}/{functionName}
 ```
 
 Example subscription:
 ```json
 {
-  "PK": "REG#123456789012#REPO#myapp#TAG#prod",
-  "SK": "TARGET#us-east-1#111111111111#myapp-function",
+  "PK": "myapp:prod",
+  "SK": "111111111111/us-east-1/myapp-function",
   "mode": "direct",
   "target": {
     "accountId": "111111111111",

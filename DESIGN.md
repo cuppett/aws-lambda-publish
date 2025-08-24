@@ -22,7 +22,7 @@ This document describes the architecture, components, data model, flows, and ope
   - Resolves tag -> digest (ECR DescribeImages)
   - Queries DynamoDB table for subscriptions
   - For each subscription: assume role (if provided) and either perform direct update or start a pipeline
-- DynamoDB: mapping table of subscriptions (PK=REG#...#REPO#...#TAG#...; SK=TARGET#...)
+- DynamoDB: mapping table of subscriptions (PK={repo}:{tag}; SK={account}/{region}/{function})
 - Pipeline (optional per account/region): generic CodePipeline + CodeBuild + CodeDeploy resources with complete buildspec and variable propagation via SSM Parameter Store
 - Spoke roles (deployed in target accounts): roles the Controller assumes to act remotely with ECR access and SSM parameter permissions
 - Monitor Lambda (scheduled): polls pending pipeline/deploy executions for status and writes back (runs every 5 minutes)
@@ -41,8 +41,8 @@ This document describes the architecture, components, data model, flows, and ope
 ## DynamoDB schema
 
 Table: ImageTagSubscriptions
-- PK (HASH): string — REG#{registryId}#REPO#{repositoryName}#TAG#{imageTag}
-- SK (RANGE): string — TARGET#{region}#{accountId}#{functionName}
+- PK (HASH): string — {repositoryName}:{imageTag}
+- SK (RANGE): string — {accountId}/{region}/{functionName}
 - Attributes:
   - mode: string — "direct" | "pipeline"
   - target: map — { accountId, region, functionName, aliasName? }
@@ -57,8 +57,8 @@ Table: ImageTagSubscriptions
 Example direct item:
 
 {
-  "PK": "REG#123456789012#REPO#orders#TAG#prod",
-  "SK": "TARGET#us-east-1#111111111111#orders-fn",
+  "PK": "orders:prod",
+  "SK": "111111111111/us-east-1/orders-fn",
   "mode": "direct",
   "target": { "accountId": "111111111111", "region": "us-east-1", "functionName": "orders-fn", "aliasName": "prod" },
   "assumeRoleArn": "arn:aws:iam::111111111111:role/HubDeploymentRole"
@@ -67,8 +67,8 @@ Example direct item:
 Example pipeline item:
 
 {
-  "PK": "REG#123456789012#REPO#orders#TAG#prod",
-  "SK": "TARGET#eu-west-1#222222222222#orders-fn",
+  "PK": "orders:prod",
+  "SK": "222222222222/eu-west-1/orders-fn",
   "mode": "pipeline",
   "target": { "accountId": "222222222222", "region": "eu-west-1", "functionName": "orders-fn", "aliasName": "prod" },
   "codeDeploy": { "applicationName": "Orders", "deploymentGroupName": "Prod", "deploymentConfigName": "Canary10Percent5Minutes" },
