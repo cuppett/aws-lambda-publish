@@ -1,0 +1,39 @@
+# SAM build artifacts
+.aws-sam/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local development
+*.local
+.env
+.env.local
+
+# Test artifacts
+test-*.json
+test-*.sh
+*.response.json
+
+# Temporary files
+*.tmp
+*.bak

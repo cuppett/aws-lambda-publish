@@ -1,0 +1,50 @@
+{
+  "ImageTagSubscriptions": [
+    {
+      "PutRequest": {
+        "Item": {
+          "PK": {"S": "lambda-publish-test:direct-test"},
+          "SK": {"S": "771294529343/us-west-2/lambda-publish-test-function"},
+          "mode": {"S": "direct"},
+          "target": {
+            "M": {
+              "accountId": {"S": "771294529343"},
+              "region": {"S": "us-west-2"},
+              "functionName": {"S": "lambda-publish-test-function"},
+              "aliasName": {"S": "test-direct"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "PutRequest": {
+        "Item": {
+          "PK": {"S": "lambda-publish-test:pipeline-test"},
+          "SK": {"S": "771294529343/us-west-2/lambda-publish-pipeline-test"},
+          "mode": {"S": "pipeline"},
+          "target": {
+            "M": {
+              "accountId": {"S": "771294529343"},
+              "region": {"S": "us-west-2"},
+              "functionName": {"S": "lambda-publish-pipeline-test"},
+              "aliasName": {"S": "test-pipeline"}
+            }
+          },
+          "codeDeploy": {
+            "M": {
+              "applicationName": {"S": "LambdaPublishTest"},
+              "deploymentGroupName": {"S": "TestGroup"},
+              "deploymentConfigName": {"S": "CodeDeployDefault.LambdaCanary10Percent5Minutes"}
+            }
+          },
+          "pipeline": {
+            "M": {
+              "name": {"S": "lambda-publish-test-pipeline"}
+            }
+          }
+        }
+      }
+    }
+  ]
+}

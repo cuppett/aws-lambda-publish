@@ -15,6 +15,7 @@ Globals:
         LOG_LEVEL: INFO
         METRICS_NAMESPACE: LambdaPublish
         ASSUME_ROLE_SESSION_NAME: lambda-publish
+        SCAN_SEVERITY_THRESHOLD: HIGH
 
 Resources:
   ControllerFunction:
@@ -62,10 +63,42 @@ Resources:
               Action:
                 - cloudwatch:PutMetricData
               Resource: '*'
+
+  VulnerabilityCheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: lambda-publish-vulnerability-check
+      Handler: src.vulnerability_check.lambda_handler.handler
+      CodeUri: .
+      Policies:
+        - Statement:
             - Effect: Allow
               Action:
-                - states:StartExecution
-              Resource: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:lambda-publish-orchestrator'
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: '*'
+
+  EcrScanOrchestrator:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: lambda-publish-orchestrator
+      DefinitionUri: infra/state-machine.asl.json
+      DefinitionSubstitutions:
+        ControllerFunction: !Ref ControllerFunction
+        VulnerabilityCheckFunction: !Ref VulnerabilityCheckFunction
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ecr:DescribeImageScanFindings
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource: 
+                - !GetAtt ControllerFunction.Arn
+                - !GetAtt VulnerabilityCheckFunction.Arn
       Events:
         EcrPush:
           Type: EventBridgeRule
@@ -78,6 +111,14 @@ Resources:
               detail:
                 action-type:
                   - PUSH
+            InputTransformer:
+              InputPathsMap:
+                detail: $.detail
+              InputTemplate: |
+                {
+                  "detail": "<detail>",
+                  "threshold": "${ScanSeverityThreshold}"
+                }
 
   ImageTagSubscriptionsTable:
     Type: AWS::DynamoDB::Table
@@ -131,8 +172,22 @@ Resources:
             Schedule: rate(5 minutes)
             Name: monitor-pipeline-status
 
+Parameters:
+  ScanSeverityThreshold:
+    Type: String
+    Default: HIGH
+    Description: ECR scan severity threshold (INFORMATIONAL, LOW, MEDIUM, HIGH, CRITICAL)
+    AllowedValues:
+      - INFORMATIONAL
+      - LOW
+      - MEDIUM
+      - HIGH
+      - CRITICAL
+
 Outputs:
   ControllerFunctionName:
     Value: !Ref ControllerFunction
   TableName:
     Value: !Ref ImageTagSubscriptionsTable
+  StateMachineArn:
+    Value: !Ref EcrScanOrchestrator
