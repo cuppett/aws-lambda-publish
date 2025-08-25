@@ -120,3 +120,89 @@ def test_lambda_client_noop_vs_update():
         res = lc.update_function_direct('orders-fn', '123.dkr.ecr.us-east-1.amazonaws.com/orders@sha256:new', 'prod')
         assert res['status'] == 'updated'
         assert res['version'] == '2'
+
+
+@mock_aws
+def test_ecr_vulnerability_check():
+    ecr = boto3.client('ecr', region_name='us-east-1')
+    ecr.create_repository(repositoryName='vulnerable-app')
+    
+    manifest = json.dumps({
+        "schemaVersion": 2, "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+        "config": {"mediaType": "application/vnd.docker.container.image.v1+json", "size": 1, "digest": "sha256:a"},
+        "layers": []
+    })
+    
+    # put_image creates the digest
+    resp = ecr.put_image(repositoryName='vulnerable-app', imageManifest=manifest, imageTag='latest')
+    digest = resp['image']['imageId']['imageDigest']
+    
+    # Moto doesn't implement describe_image_scan_findings; have to mock it on the client
+    client = ECRClient(region='us-east-1')
+    from botocore.stub import Stubber
+    stubber = Stubber(client.client)
+    
+    # Scenario 1: No findings
+    stubber.add_response('describe_image_scan_findings', {
+        'imageScanStatus': {'status': 'COMPLETE'},
+        'imageScanFindings': {'findings': []}
+    }, {'repositoryName': 'vulnerable-app', 'imageId': {'imageDigest': digest}})
+    
+    with stubber:
+        assert client.check_vulnerabilities('vulnerable-app', digest, threshold='HIGH') is False
+
+    # Scenario 5: ScanNotFoundException
+    stubber.add_client_error(
+        "describe_image_scan_findings",
+        "ScanNotFoundException", 
+        "The image scan findings for the specified image are not found.",
+        expected_params={'repositoryName': 'vulnerable-app', 'imageId': {'imageDigest': digest}}
+    )
+    with stubber:
+        assert client.check_vulnerabilities('vulnerable-app', digest, threshold='HIGH') is False
+
+    # Scenario 2: Findings below threshold
+    stubber.add_response('describe_image_scan_findings', {
+        'imageScanStatus': {'status': 'COMPLETE'},
+        'imageScanFindings': {'findings': [{'severity': 'MEDIUM'}, {'severity': 'LOW'}]}
+    }, {'repositoryName': 'vulnerable-app', 'imageId': {'imageDigest': digest}})
+    
+    with stubber:
+        assert client.check_vulnerabilities('vulnerable-app', digest, threshold='HIGH') is False
+
+    # Scenario 5: ScanNotFoundException
+    stubber.add_client_error(
+        "describe_image_scan_findings",
+        "ScanNotFoundException", 
+        "The image scan findings for the specified image are not found.",
+        expected_params={'repositoryName': 'vulnerable-app', 'imageId': {'imageDigest': digest}}
+    )
+    with stubber:
+        assert client.check_vulnerabilities('vulnerable-app', digest, threshold='HIGH') is False
+        
+    # Scenario 3: Findings at threshold
+    stubber.add_response('describe_image_scan_findings', {
+        'imageScanStatus': {'status': 'COMPLETE'},
+        'imageScanFindings': {'findings': [{'severity': 'HIGH'}]}
+    }, {'repositoryName': 'vulnerable-app', 'imageId': {'imageDigest': digest}})
+    
+    with stubber:
+        assert client.check_vulnerabilities('vulnerable-app', digest, threshold='HIGH') is True
+
+    # Scenario 4: Scan in progress
+    stubber.add_response('describe_image_scan_findings', {
+        'imageScanStatus': {'status': 'IN_PROGRESS'},
+    }, {'repositoryName': 'vulnerable-app', 'imageId': {'imageDigest': digest}})
+    
+    with stubber:
+        assert client.check_vulnerabilities('vulnerable-app', digest, threshold='HIGH') is False
+
+    # Scenario 5: ScanNotFoundException
+    stubber.add_client_error(
+        "describe_image_scan_findings",
+        "ScanNotFoundException", 
+        "The image scan findings for the specified image are not found.",
+        expected_params={'repositoryName': 'vulnerable-app', 'imageId': {'imageDigest': digest}}
+    )
+    with stubber:
+        assert client.check_vulnerabilities('vulnerable-app', digest, threshold='HIGH') is False

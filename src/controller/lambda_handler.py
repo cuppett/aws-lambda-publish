@@ -53,6 +53,20 @@ def handler(event, context):
             metrics.increment_counter("DigestResolutionFailures", {"Repository": repository, "Tag": image_tag})
             return {"status": "error", "reason": "no_digest"}
 
+        if ecr.check_vulnerabilities(repository, digest, registry_id, config.scan_severity_threshold):
+            logger.error(json.dumps({"msg": "vulnerability found", "correlationId": correlation_id, "repository": repository, "digest": digest}))
+            metrics.increment_counter("VulnerableDeploymentBlocked", {"Repository": repository, "Digest": digest})
+            
+            ddb = DDBClient(table_name=config.table_name, region=region)
+            pk = f"{repository}:{image_tag}"
+            targets = ddb.get_targets(pk)
+            for t in targets:
+                sk = t.get("SK") or f"{t.get('target', {}).get('accountId', '')}/{t.get('target', {}).get('region', hub_region)}/{t.get('target', {}).get('functionName')}"
+                ddb.update_scan_status(pk, sk, digest, "BLOCKED", {"message": "Vulnerabilities found"})
+
+            return {"status": "error", "reason": "vulnerability_found"}
+
+
         ddb = DDBClient(table_name=config.table_name, region=region)
         pk = f"{repository}:{image_tag}"
         targets = ddb.get_targets(pk)

@@ -96,6 +96,7 @@ Environment variables are centralized in `Config` class with sensible defaults:
 - `DEFAULT_UPDATE_STRATEGY`: publish-and-alias|publish-only|update-only (default: publish-and-alias)
 - `MAX_PARALLEL_TARGETS`: Concurrency limit (default: 10)
 - `METRICS_NAMESPACE`: CloudWatch namespace (default: LambdaPublish)
+- `SCAN_SEVERITY_THRESHOLD`: Blocks deployments if vulnerabilities meet or exceed this level (e.g., HIGH, CRITICAL). Default: `HIGH`.
 
 ## Testing Strategy
 
@@ -138,6 +139,9 @@ The `LambdaClient.get_current_image_digest()` method handles both:
 - Tag-based URIs: `account.dkr.ecr.region.amazonaws.com/repo:tag` (resolved via ECR)
 
 This is critical for idempotency checks when Lambda functions use tag-based ImageURIs instead of digest-based ones.
+
+### ECR Image Scanning
+The Controller Lambda can automatically check for vulnerabilities in the pushed image using ECR's image scanning feature. If vulnerabilities are found that meet or exceed the `SCAN_SEVERITY_THRESHOLD`, the deployment is blocked. This requires the `ecr:DescribeImageScanFindings` IAM permission.
 
 ### Idempotency
 Uses DynamoDB conditional updates: `SET lastProcessedDigest = :d IF attribute_not_exists OR <> :d`

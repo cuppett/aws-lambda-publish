@@ -105,3 +105,19 @@ class DDBClient:
             return True
         except Exception:
             return False
+
+    def update_scan_status(self, pk: str, sk: str, digest: str, status: str, findings: dict) -> bool:
+        try:
+            self.client.update_item(
+                TableName=self.table,
+                Key={'PK': {'S': pk}, 'SK': {'S': sk}},
+                UpdateExpression='SET lastScanDigest = :d, lastScanStatus = :s, lastScanFindings = :f',
+                ExpressionAttributeValues={
+                    ':d': {'S': digest},
+                    ':s': {'S': status},
+                    ':f': _to_ddb(findings)
+                }
+            )
+            return True
+        except Exception:
+            return False

@@ -9,3 +9,4 @@ class Config:
         self.default_update_strategy = os.environ.get("DEFAULT_UPDATE_STRATEGY", "publish-and-alias")
         self.metrics_namespace = os.environ.get("METRICS_NAMESPACE", "LambdaPublish")
         self.log_level = os.environ.get("LOG_LEVEL", "INFO")
+        self.scan_severity_threshold = os.environ.get("SCAN_SEVERITY_THRESHOLD", "HIGH")
