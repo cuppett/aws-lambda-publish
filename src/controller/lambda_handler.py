@@ -120,7 +120,7 @@ def process_target(target_item, repository, digest, registry_id, hub_region, pk,
         image_uri = f"{registry_id}.dkr.ecr.{region}.amazonaws.com/{repository}@{digest}"
 
         if mode == "direct":
-            lc = LambdaClient(region=region, credentials=creds)
+            lc = LambdaClient(region=region, credentials=creds, sns_topic_arn=config.sns_topic_arn)
             new_digest = image_uri.split('@', 1)[1]
             
             # Idempotency check
@@ -135,7 +135,10 @@ def process_target(target_item, repository, digest, registry_id, hub_region, pk,
                 metrics.record_updated_function(repository, sk.split('#')[-1], mode, "noop-idempotent")
                 return {"function": function_name, "status": "noop-idempotent"}
             
-            res = with_retries(lambda: lc.update_function_direct(function_name, image_uri, alias, config.default_update_strategy))
+            # Extract health check configuration from target item
+            health_check_config = target_item.get("healthCheck")
+            
+            res = with_retries(lambda: lc.update_function_direct(function_name, image_uri, alias, config.default_update_strategy, health_check_config))
             status = res.get("status")
             DDBClient(table_name=config.table_name, region=region).update_last_processed(pk, sk, new_digest, status)
             metrics.record_updated_function(repository, sk.split('#')[-1], mode, status)

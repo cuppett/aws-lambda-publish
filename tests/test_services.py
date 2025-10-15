@@ -11,6 +11,8 @@ sys.path.insert(0, os.getcwd())
 from src.controller.services.ddb_client import DDBClient
 from src.controller.services.ecr_client import ECRClient
 from src.controller.services.lambda_client import LambdaClient
+from src.controller.services.health_check_client import HealthCheckClient
+from src.controller.services.notification_client import NotificationClient
 
 
 def _put_ddb_item(client, table, item):
@@ -206,3 +208,91 @@ def test_ecr_vulnerability_check():
     )
     with stubber:
         assert client.check_vulnerabilities('vulnerable-app', digest, threshold='HIGH') is False
+
+
+
+def test_health_check_client_success():
+    """Test successful health check"""
+    health_check_client = HealthCheckClient(region="us-east-1")
+    
+    # Test health check with enabled=False (should pass)
+    health_config = {"enabled": False}
+    result = health_check_client.perform_health_check("test-function", "1", health_config)
+    assert result is True
+    
+    # Test health check with stubber for successful invoke
+    from botocore.stub import Stubber
+    stubber = Stubber(health_check_client.lambda_client)
+    
+    # Mock successful invoke
+    stubber.add_response('invoke', {
+        'StatusCode': 200,
+        'Payload': botocore.response.StreamingBody(
+            raw_stream=json.dumps({'result': 'success'}).encode(),
+            content_length=len(json.dumps({'result': 'success'}))
+        )
+    }, {
+        'FunctionName': 'test-function:1',
+        'InvocationType': 'RequestResponse',
+        'Payload': b'{"test": "data"}'
+    })
+    
+    health_config = {
+        "enabled": True,
+        "payload": '{"test": "data"}',
+        "timeoutSeconds": 5
+    }
+    
+    with stubber:
+        result = health_check_client.perform_health_check("test-function", "1", health_config)
+        assert result is True
+
+
+@mock_aws 
+def test_health_check_client_failure():
+    """Test health check failure scenarios"""
+    health_check_client = HealthCheckClient(region="us-east-1")
+    
+    # Test health check against non-existent function
+    health_config = {
+        "enabled": True,
+        "payload": "{\"test\": \"data\"}",
+        "timeoutSeconds": 5
+    }
+    result = health_check_client.perform_health_check("non-existent-function", "1", health_config)
+    assert result is False
+
+
+@mock_aws
+def test_notification_client():
+    """Test SNS notification functionality"""
+    sns_client = boto3.client("sns", region_name="us-east-1")
+    
+    # Create a test topic
+    topic_response = sns_client.create_topic(Name="test-deployment-failures")
+    topic_arn = topic_response["TopicArn"]
+    
+    notification_client = NotificationClient(region="us-east-1", sns_topic_arn=topic_arn)
+    
+    # Test successful notification
+    result = notification_client.send_deployment_failure_notification(
+        function_name="test-function",
+        failure_type="health_check",
+        error_details="Health check failed",
+        deployment_context={"version": "2", "action": "rollback"}
+    )
+    assert result is True
+
+
+def test_notification_client_no_topic():
+    """Test notification client without SNS topic configured"""
+    notification_client = NotificationClient(region="us-east-1", sns_topic_arn=None)
+    
+    # Should return False but not error
+    result = notification_client.send_deployment_failure_notification(
+        function_name="test-function",
+        failure_type="health_check",
+        error_details="Health check failed"
+    )
+    assert result is False
+

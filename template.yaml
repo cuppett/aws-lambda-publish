@@ -16,6 +16,8 @@ Globals:
         METRICS_NAMESPACE: LambdaPublish
         ASSUME_ROLE_SESSION_NAME: lambda-publish
         SCAN_SEVERITY_THRESHOLD: HIGH
+        SNS_TOPIC_ARN: !Ref DeploymentFailuresTopic
+        DEFAULT_HEALTH_CHECK_TIMEOUT: 10
 
 Resources:
   ControllerFunction:
@@ -36,10 +38,13 @@ Resources:
             - Effect: Allow
               Action:
                 - lambda:GetFunctionConfiguration
+                - lambda:GetFunction
                 - lambda:UpdateFunctionCode
                 - lambda:PublishVersion
                 - lambda:UpdateAlias
                 - lambda:CreateAlias
+                - lambda:InvokeFunction
+                - lambda:DeleteFunction
               Resource: '*'
             - Effect: Allow
               Action:
@@ -63,6 +68,10 @@ Resources:
               Action:
                 - cloudwatch:PutMetricData
               Resource: '*'
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref DeploymentFailuresTopic
 
   VulnerabilityCheckFunction:
     Type: AWS::Serverless::Function
@@ -165,12 +174,23 @@ Resources:
                 - ssm:GetParametersByPath
               Resource: 
                 - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/lambda-publish/*'
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref DeploymentFailuresTopic
       Events:
         ScheduleRule:
           Type: Schedule
           Properties:
             Schedule: rate(5 minutes)
             Name: monitor-pipeline-status
+
+  DeploymentFailuresTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: lambda-publish-deployment-failures
+      DisplayName: Lambda Publish Deployment Failures
+      KmsMasterKeyId: alias/aws/sns
 
 Parameters:
   ScanSeverityThreshold:
@@ -191,3 +211,6 @@ Outputs:
     Value: !Ref ImageTagSubscriptionsTable
   StateMachineArn:
     Value: !Ref EcrScanOrchestrator
+  DeploymentFailuresTopicArn:
+    Description: SNS Topic ARN for deployment failure notifications
+    Value: !Ref DeploymentFailuresTopic
