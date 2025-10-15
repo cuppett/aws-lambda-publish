@@ -1,16 +1,23 @@
 import boto3
 import time
 import logging
+from typing import Dict, Any, Optional
+from .health_check_client import HealthCheckClient
+from .notification_client import NotificationClient
 
 logger = logging.getLogger(__name__)
 
 class LambdaClient:
-    def __init__(self, region=None, credentials=None):
+    def __init__(self, region=None, credentials=None, sns_topic_arn=None):
         session = boto3.Session(region_name=region,
                                 aws_access_key_id=(credentials.get('AccessKeyId') if credentials else None),
                                 aws_secret_access_key=(credentials.get('SecretAccessKey') if credentials else None),
                                 aws_session_token=(credentials.get('SessionToken') if credentials else None))
         self.client = session.client('lambda')
+        self.region = region
+        self.credentials = credentials
+        self.health_check_client = HealthCheckClient(region=region, credentials=credentials)
+        self.notification_client = NotificationClient(region=region, credentials=credentials, sns_topic_arn=sns_topic_arn)
 
     def get_current_image_digest(self, function_name):
         try:
@@ -79,7 +86,7 @@ class LambdaClient:
             logger.exception(f"Failed to get current image digest for {function_name}: {e}")
             return None
 
-    def update_function_direct(self, function_name, image_uri, alias_name=None, update_strategy="publish-and-alias"):
+    def update_function_direct(self, function_name, image_uri, alias_name=None, update_strategy="publish-and-alias", health_check_config=None):
         try:
             cur = self.get_current_image_digest(function_name)
             
@@ -131,8 +138,51 @@ class LambdaClient:
                 publish = self.client.publish_version(FunctionName=function_name)
                 version = publish.get('Version')
                 logger.info(f"Published version {version} for function {function_name}")
+                
+                # Perform health check if configured and version was published
+                if health_check_config and version:
+                    health_check_passed = self.health_check_client.perform_health_check(
+                        function_name=function_name,
+                        version=version,
+                        health_check_config=health_check_config
+                    )
+                    
+                    if not health_check_passed:
+                        error_msg = f"Health check failed for version {version}"
+                        logger.error(f"Health check failed for {function_name}:{version}, initiating rollback")
+                        
+                        # Send notification about health check failure
+                        self.notification_client.send_health_check_failure_notification(
+                            function_name=function_name,
+                            version=version,
+                            health_check_config=health_check_config,
+                            error_details=error_msg
+                        )
+                        
+                        # Attempt to rollback by deleting the failed version
+                        rollback_success = self.health_check_client.rollback_version(function_name, version)
+                        
+                        if rollback_success:
+                            logger.info(f"Successfully rolled back {function_name} by deleting version {version}")
+                            return {
+                                "function": function_name, 
+                                "status": "error", 
+                                "error": f"Health check failed, rollback completed",
+                                "rollback_performed": True,
+                                "failed_version": version
+                            }
+                        else:
+                            logger.error(f"Rollback failed for {function_name}:{version}")
+                            return {
+                                "function": function_name, 
+                                "status": "error", 
+                                "error": f"Health check failed, rollback also failed",
+                                "rollback_performed": False,
+                                "failed_version": version
+                            }
             
-            if update_strategy == "publish-and-alias" and alias_name:
+            # If we reach here, health check passed or wasn't required, proceed with alias update
+            if update_strategy == "publish-and-alias" and alias_name and version:
                 # Update or create alias
                 try:
                     logger.info(f"Updating alias {alias_name} to version {version} for function {function_name}")
@@ -162,6 +212,8 @@ class LambdaClient:
                 result["version"] = version
             if alias_name and update_strategy == "publish-and-alias":
                 result["alias"] = alias_name
+            if health_check_config:
+                result["health_check_performed"] = True
                 
             return result
             

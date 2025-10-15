@@ -1,0 +1,127 @@
+{
+  "Comment": "ECR Image Vulnerability Scan Orchestrator",
+  "StartAt": "CheckScanStatus",
+  "States": {
+    "CheckScanStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ecr:describeImageScanFindings",
+      "Parameters": {
+        "RepositoryName.$": "$.detail.repository-name",
+        "ImageId": {
+          "ImageTag.$": "$.detail.image-tag"
+        },
+        "RegistryId.$": "$.detail.registry-id"
+      },
+      "ResultPath": "$.scanResults",
+      "Next": "EvaluateScanStatus",
+      "Catch": [
+        {
+          "ErrorEquals": ["ECR.ScanNotFoundException"],
+          "Next": "ScanNotFound",
+          "ResultPath": "$.error"
+        },
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "ScanCheckFailed",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "EvaluateScanStatus": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.scanResults.ImageScanStatus.Status",
+          "StringEquals": "COMPLETE",
+          "Next": "CheckVulnerabilities"
+        },
+        {
+          "Variable": "$.scanResults.ImageScanStatus.Status",
+          "StringEquals": "IN_PROGRESS",
+          "Next": "WaitForScan"
+        },
+        {
+          "Variable": "$.scanResults.ImageScanStatus.Status",
+          "StringEquals": "FAILED",
+          "Next": "ScanFailed"
+        }
+      ],
+      "Default": "ScanStatusUnknown"
+    },
+    "WaitForScan": {
+      "Type": "Wait",
+      "Seconds": 15,
+      "Next": "CheckScanStatus"
+    },
+    "CheckVulnerabilities": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${VulnerabilityCheckFunction}",
+        "Payload": {
+          "scanResults.$": "$.scanResults",
+          "threshold.$": "$.threshold"
+        }
+      },
+      "ResultPath": "$.vulnerabilityCheck",
+      "Next": "EvaluateVulnerabilities",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "VulnerabilityCheckFailed",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "EvaluateVulnerabilities": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.vulnerabilityCheck.Payload.deploymentAllowed",
+          "BooleanEquals": true,
+          "Next": "InvokeController"
+        }
+      ],
+      "Default": "VulnerabilitiesDetected"
+    },
+    "InvokeController": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ControllerFunction}",
+        "Payload.$": "$"
+      },
+      "End": true
+    },
+    "ScanNotFound": {
+      "Type": "Fail",
+      "Cause": "ECR image scan not found",
+      "Error": "ScanNotFound"
+    },
+    "ScanCheckFailed": {
+      "Type": "Fail",
+      "Cause": "Failed to check ECR scan status",
+      "Error": "ScanCheckFailed"
+    },
+    "ScanFailed": {
+      "Type": "Fail",
+      "Cause": "ECR image scan failed",
+      "Error": "ScanFailed"
+    },
+    "ScanStatusUnknown": {
+      "Type": "Fail",
+      "Cause": "Unknown ECR scan status",
+      "Error": "ScanStatusUnknown"
+    },
+    "VulnerabilityCheckFailed": {
+      "Type": "Fail",
+      "Cause": "Failed to evaluate vulnerabilities",
+      "Error": "VulnerabilityCheckFailed"
+    },
+    "VulnerabilitiesDetected": {
+      "Type": "Fail",
+      "Cause": "Image contains vulnerabilities above threshold",
+      "Error": "VulnerabilitiesDetected"
+    }
+  }
+}

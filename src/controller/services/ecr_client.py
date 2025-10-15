@@ -1,6 +1,9 @@
 import boto3
 import botocore
 import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class ECRClient:
@@ -31,3 +34,48 @@ class ECRClient:
                 return None
             except Exception:
                 return None
+
+    def check_vulnerabilities(self, repository, digest, registry_id=None, threshold='HIGH'):
+        params = {"repositoryName": repository, "imageId": {"imageDigest": digest}}
+        if registry_id:
+            params["registryId"] = registry_id
+        
+        severity_order = ['INFORMATIONAL', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL', 'UNDEFINED']
+        try:
+            threshold_index = severity_order.index(threshold.upper())
+        except ValueError:
+            logger.error(f"Invalid severity threshold: {threshold}")
+            return True
+
+        try:
+            paginator = self.client.get_paginator('describe_image_scan_findings')
+            for page in paginator.paginate(**params):
+                if page['imageScanStatus']['status'] == 'FAILED':
+                    logger.warning(f"Image scan failed for {repository}@{digest}: {page['imageScanStatus'].get('description')}")
+                    return False 
+
+                if page['imageScanStatus']['status'] != 'COMPLETE':
+                    logger.info(f"Image scan not complete for {repository}@{digest}, status is {page['imageScanStatus']['status']}")
+                    return False
+
+                findings = page.get('imageScanFindings', {}).get('findings', [])
+                for finding in findings:
+                    severity = finding.get('severity', 'UNDEFINED')
+                    try:
+                        severity_index = severity_order.index(severity)
+                        if severity_index >= threshold_index:
+                            logger.warning(f"Vulnerability found for {repository}@{digest} with severity {severity} >= {threshold}")
+                            return True
+                    except ValueError:
+                        logger.warning(f"Unknown severity '{severity}' found for {repository}@{digest}")
+
+            return False
+        except botocore.exceptions.ClientError as e:
+            if e.response.get('Error', {}).get('Code') == 'ScanNotFoundException':
+                logger.info(f"No scan found for image {repository}@{digest}")
+                return False
+            logger.error(f"Error checking vulnerabilities for {repository}@{digest}: {e}")
+            return True
+        except Exception as e:
+            logger.error(f"Unexpected error checking vulnerabilities for {repository}@{digest}: {e}")
+            return True

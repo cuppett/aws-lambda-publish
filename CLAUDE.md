@@ -44,11 +44,15 @@ aws cloudformation deploy --template-file infra/pipeline.yaml --stack-name lambd
 - **DDBClient**: Handles DynamoDB operations with custom marshalling for complex types (S, N, BOOL, M, L)
 - **ECRClient**: Resolves image tags to immutable digests with retry logic
 - **LambdaClient**: Updates container functions with multiple strategies (publish-and-alias, publish-only, update-only)
+- **HealthCheckClient**: Validates Lambda function deployments and handles rollbacks
+- **NotificationClient**: Sends SNS notifications for deployment failures
 - **PipelineClient**: Starts CodePipeline executions with SSM Parameter Store variable propagation
 - **MetricsClient**: CloudWatch metrics emission for monitoring (UpdatedFunctionCount, NoOpCount, Failures, etc.)
 
 ### Deployment Modes
 1. **Direct Mode**: Controller directly updates Lambda function code and publishes versions
+   - Supports optional health checks and automatic rollbacks
+   - Can perform validation before updating aliases
 2. **Pipeline Mode**: Controller starts CodePipeline execution which handles CodeDeploy for traffic shifting
 
 ### Cross-Account Support
@@ -62,7 +66,7 @@ aws cloudformation deploy --template-file infra/pipeline.yaml --stack-name lambd
 2. Controller resolves tag to digest via ECR DescribeImages
 3. Queries DynamoDB for subscriptions using pattern: `PK={repo}:{tag}`
 4. For each target, either:
-   - Direct: Update Lambda function immediately with idempotency checks
+   - Direct: Update Lambda function immediately with idempotency checks, optional health checks, and automatic rollbacks
    - Pipeline: Store variables in SSM Parameter Store and start pipeline execution
 5. Monitor Lambda polls pipeline status every 5 minutes and updates DynamoDB
 
@@ -84,6 +88,11 @@ Example subscription:
     "region": "us-east-1", 
     "functionName": "myapp-function",
     "aliasName": "prod"
+  },
+  "healthCheck": {
+    "enabled": true,
+    "payload": "{\"action\": \"healthcheck\"}",
+    "timeoutSeconds": 10
   }
 }
 ```
@@ -96,12 +105,61 @@ Environment variables are centralized in `Config` class with sensible defaults:
 - `DEFAULT_UPDATE_STRATEGY`: publish-and-alias|publish-only|update-only (default: publish-and-alias)
 - `MAX_PARALLEL_TARGETS`: Concurrency limit (default: 10)
 - `METRICS_NAMESPACE`: CloudWatch namespace (default: LambdaPublish)
+- `SCAN_SEVERITY_THRESHOLD`: Blocks deployments if vulnerabilities meet or exceed this level (e.g., HIGH, CRITICAL). Default: `HIGH`.
+- `SNS_TOPIC_ARN`: SNS topic for deployment failure notifications (optional)
+- `DEFAULT_HEALTH_CHECK_TIMEOUT`: Default timeout for health checks in seconds (default: 10)
+
+## Health Checks and Rollbacks
+
+The system supports optional health checks for direct deployments to ensure code quality and prevent broken deployments from impacting production.
+
+### How Health Checks Work
+
+1. **Version Publishing**: When a Lambda function is updated, a new version is published
+2. **Health Check Execution**: If health checks are enabled, the system invokes the new version with a test payload
+3. **Validation**: The health check passes if the Lambda invocation returns successfully without errors
+4. **Alias Update**: If the health check passes, the alias is updated to point to the new version
+5. **Rollback**: If the health check fails, the new version is deleted and the alias remains pointing to the previous stable version
+
+### Configuration
+
+Health checks are configured per subscription in DynamoDB:
+
+```json
+{
+  "healthCheck": {
+    "enabled": true,
+    "payload": "{\"action\": \"healthcheck\", \"test\": true}",
+    "timeoutSeconds": 10
+  }
+}
+```
+
+- `enabled`: Boolean flag to enable/disable health checks
+- `payload`: JSON string payload to send to the Lambda function for validation
+- `timeoutSeconds`: Maximum time to wait for the health check response
+
+### Failure Notifications
+
+When health checks fail or other deployment errors occur, notifications are sent via SNS:
+
+- **Health Check Failures**: Includes function name, version, and health check configuration
+- **Pipeline Failures**: Includes pipeline name, execution ID, and error details
+- **Rollback Status**: Indicates whether automatic rollback was successful
+
+### Best Practices
+
+1. **Health Check Payload**: Design your Lambda function to recognize health check payloads and perform basic validation
+2. **Timeout Settings**: Set appropriate timeouts based on your function's expected response time
+3. **SNS Subscriptions**: Subscribe to the deployment failures topic for alerting
+4. **Monitoring**: Monitor CloudWatch metrics for deployment success/failure rates
 
 ## Testing Strategy
 
 ### Unit Testing
 - Unit tests use pytest + moto for AWS service mocking
 - DynamoDB marshalling, ECR digest resolution, and Lambda update flows are tested
+- Health check and notification functionality comprehensively tested
 - Botocore Stubber used for complex Lambda client interactions
 
 ### Local Testing Commands
@@ -138,6 +196,9 @@ The `LambdaClient.get_current_image_digest()` method handles both:
 - Tag-based URIs: `account.dkr.ecr.region.amazonaws.com/repo:tag` (resolved via ECR)
 
 This is critical for idempotency checks when Lambda functions use tag-based ImageURIs instead of digest-based ones.
+
+### ECR Image Scanning
+The Controller Lambda can automatically check for vulnerabilities in the pushed image using ECR's image scanning feature. If vulnerabilities are found that meet or exceed the `SCAN_SEVERITY_THRESHOLD`, the deployment is blocked. This requires the `ecr:DescribeImageScanFindings` IAM permission.
 
 ### Idempotency
 Uses DynamoDB conditional updates: `SET lastProcessedDigest = :d IF attribute_not_exists OR <> :d`

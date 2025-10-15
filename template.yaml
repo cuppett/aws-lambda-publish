@@ -15,6 +15,9 @@ Globals:
         LOG_LEVEL: INFO
         METRICS_NAMESPACE: LambdaPublish
         ASSUME_ROLE_SESSION_NAME: lambda-publish
+        SCAN_SEVERITY_THRESHOLD: HIGH
+        SNS_TOPIC_ARN: !Ref DeploymentFailuresTopic
+        DEFAULT_HEALTH_CHECK_TIMEOUT: 10
 
 Resources:
   ControllerFunction:
@@ -30,14 +33,18 @@ Resources:
             - Effect: Allow
               Action:
                 - ecr:DescribeImages
+                - ecr:DescribeImageScanFindings
               Resource: '*'
             - Effect: Allow
               Action:
                 - lambda:GetFunctionConfiguration
+                - lambda:GetFunction
                 - lambda:UpdateFunctionCode
                 - lambda:PublishVersion
                 - lambda:UpdateAlias
                 - lambda:CreateAlias
+                - lambda:InvokeFunction
+                - lambda:DeleteFunction
               Resource: '*'
             - Effect: Allow
               Action:
@@ -61,6 +68,46 @@ Resources:
               Action:
                 - cloudwatch:PutMetricData
               Resource: '*'
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref DeploymentFailuresTopic
+
+  VulnerabilityCheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: lambda-publish-vulnerability-check
+      Handler: src.vulnerability_check.lambda_handler.handler
+      CodeUri: .
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: '*'
+
+  EcrScanOrchestrator:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: lambda-publish-orchestrator
+      DefinitionUri: infra/state-machine.asl.json
+      DefinitionSubstitutions:
+        ControllerFunction: !Ref ControllerFunction
+        VulnerabilityCheckFunction: !Ref VulnerabilityCheckFunction
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ecr:DescribeImageScanFindings
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource: 
+                - !GetAtt ControllerFunction.Arn
+                - !GetAtt VulnerabilityCheckFunction.Arn
       Events:
         EcrPush:
           Type: EventBridgeRule
@@ -73,6 +120,14 @@ Resources:
               detail:
                 action-type:
                   - PUSH
+            InputTransformer:
+              InputPathsMap:
+                detail: $.detail
+              InputTemplate: |
+                {
+                  "detail": "<detail>",
+                  "threshold": "${ScanSeverityThreshold}"
+                }
 
   ImageTagSubscriptionsTable:
     Type: AWS::DynamoDB::Table
@@ -119,6 +174,10 @@ Resources:
                 - ssm:GetParametersByPath
               Resource: 
                 - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/lambda-publish/*'
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref DeploymentFailuresTopic
       Events:
         ScheduleRule:
           Type: Schedule
@@ -126,8 +185,32 @@ Resources:
             Schedule: rate(5 minutes)
             Name: monitor-pipeline-status
 
+  DeploymentFailuresTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: lambda-publish-deployment-failures
+      DisplayName: Lambda Publish Deployment Failures
+      KmsMasterKeyId: alias/aws/sns
+
+Parameters:
+  ScanSeverityThreshold:
+    Type: String
+    Default: HIGH
+    Description: ECR scan severity threshold (INFORMATIONAL, LOW, MEDIUM, HIGH, CRITICAL)
+    AllowedValues:
+      - INFORMATIONAL
+      - LOW
+      - MEDIUM
+      - HIGH
+      - CRITICAL
+
 Outputs:
   ControllerFunctionName:
     Value: !Ref ControllerFunction
   TableName:
     Value: !Ref ImageTagSubscriptionsTable
+  StateMachineArn:
+    Value: !Ref EcrScanOrchestrator
+  DeploymentFailuresTopicArn:
+    Description: SNS Topic ARN for deployment failure notifications
+    Value: !Ref DeploymentFailuresTopic

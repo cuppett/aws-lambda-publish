@@ -11,6 +11,8 @@ sys.path.insert(0, os.getcwd())
 from src.controller.services.ddb_client import DDBClient
 from src.controller.services.ecr_client import ECRClient
 from src.controller.services.lambda_client import LambdaClient
+from src.controller.services.health_check_client import HealthCheckClient
+from src.controller.services.notification_client import NotificationClient
 
 
 def _put_ddb_item(client, table, item):
@@ -120,3 +122,177 @@ def test_lambda_client_noop_vs_update():
         res = lc.update_function_direct('orders-fn', '123.dkr.ecr.us-east-1.amazonaws.com/orders@sha256:new', 'prod')
         assert res['status'] == 'updated'
         assert res['version'] == '2'
+
+
+@mock_aws
+def test_ecr_vulnerability_check():
+    ecr = boto3.client('ecr', region_name='us-east-1')
+    ecr.create_repository(repositoryName='vulnerable-app')
+    
+    manifest = json.dumps({
+        "schemaVersion": 2, "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+        "config": {"mediaType": "application/vnd.docker.container.image.v1+json", "size": 1, "digest": "sha256:a"},
+        "layers": []
+    })
+    
+    # put_image creates the digest
+    resp = ecr.put_image(repositoryName='vulnerable-app', imageManifest=manifest, imageTag='latest')
+    digest = resp['image']['imageId']['imageDigest']
+    
+    # Moto doesn't implement describe_image_scan_findings; have to mock it on the client
+    client = ECRClient(region='us-east-1')
+    from botocore.stub import Stubber
+    stubber = Stubber(client.client)
+    
+    # Scenario 1: No findings
+    stubber.add_response('describe_image_scan_findings', {
+        'imageScanStatus': {'status': 'COMPLETE'},
+        'imageScanFindings': {'findings': []}
+    }, {'repositoryName': 'vulnerable-app', 'imageId': {'imageDigest': digest}})
+    
+    with stubber:
+        assert client.check_vulnerabilities('vulnerable-app', digest, threshold='HIGH') is False
+
+    # Scenario 5: ScanNotFoundException
+    stubber.add_client_error(
+        "describe_image_scan_findings",
+        "ScanNotFoundException", 
+        "The image scan findings for the specified image are not found.",
+        expected_params={'repositoryName': 'vulnerable-app', 'imageId': {'imageDigest': digest}}
+    )
+    with stubber:
+        assert client.check_vulnerabilities('vulnerable-app', digest, threshold='HIGH') is False
+
+    # Scenario 2: Findings below threshold
+    stubber.add_response('describe_image_scan_findings', {
+        'imageScanStatus': {'status': 'COMPLETE'},
+        'imageScanFindings': {'findings': [{'severity': 'MEDIUM'}, {'severity': 'LOW'}]}
+    }, {'repositoryName': 'vulnerable-app', 'imageId': {'imageDigest': digest}})
+    
+    with stubber:
+        assert client.check_vulnerabilities('vulnerable-app', digest, threshold='HIGH') is False
+
+    # Scenario 5: ScanNotFoundException
+    stubber.add_client_error(
+        "describe_image_scan_findings",
+        "ScanNotFoundException", 
+        "The image scan findings for the specified image are not found.",
+        expected_params={'repositoryName': 'vulnerable-app', 'imageId': {'imageDigest': digest}}
+    )
+    with stubber:
+        assert client.check_vulnerabilities('vulnerable-app', digest, threshold='HIGH') is False
+        
+    # Scenario 3: Findings at threshold
+    stubber.add_response('describe_image_scan_findings', {
+        'imageScanStatus': {'status': 'COMPLETE'},
+        'imageScanFindings': {'findings': [{'severity': 'HIGH'}]}
+    }, {'repositoryName': 'vulnerable-app', 'imageId': {'imageDigest': digest}})
+    
+    with stubber:
+        assert client.check_vulnerabilities('vulnerable-app', digest, threshold='HIGH') is True
+
+    # Scenario 4: Scan in progress
+    stubber.add_response('describe_image_scan_findings', {
+        'imageScanStatus': {'status': 'IN_PROGRESS'},
+    }, {'repositoryName': 'vulnerable-app', 'imageId': {'imageDigest': digest}})
+    
+    with stubber:
+        assert client.check_vulnerabilities('vulnerable-app', digest, threshold='HIGH') is False
+
+    # Scenario 5: ScanNotFoundException
+    stubber.add_client_error(
+        "describe_image_scan_findings",
+        "ScanNotFoundException", 
+        "The image scan findings for the specified image are not found.",
+        expected_params={'repositoryName': 'vulnerable-app', 'imageId': {'imageDigest': digest}}
+    )
+    with stubber:
+        assert client.check_vulnerabilities('vulnerable-app', digest, threshold='HIGH') is False
+
+
+
+def test_health_check_client_success():
+    """Test successful health check"""
+    health_check_client = HealthCheckClient(region="us-east-1")
+    
+    # Test health check with enabled=False (should pass)
+    health_config = {"enabled": False}
+    result = health_check_client.perform_health_check("test-function", "1", health_config)
+    assert result is True
+    
+    # Test health check with stubber for successful invoke
+    from botocore.stub import Stubber
+    stubber = Stubber(health_check_client.lambda_client)
+    
+    # Mock successful invoke
+    stubber.add_response('invoke', {
+        'StatusCode': 200,
+        'Payload': botocore.response.StreamingBody(
+            raw_stream=json.dumps({'result': 'success'}).encode(),
+            content_length=len(json.dumps({'result': 'success'}))
+        )
+    }, {
+        'FunctionName': 'test-function:1',
+        'InvocationType': 'RequestResponse',
+        'Payload': b'{"test": "data"}'
+    })
+    
+    health_config = {
+        "enabled": True,
+        "payload": '{"test": "data"}',
+        "timeoutSeconds": 5
+    }
+    
+    with stubber:
+        result = health_check_client.perform_health_check("test-function", "1", health_config)
+        assert result is True
+
+
+@mock_aws 
+def test_health_check_client_failure():
+    """Test health check failure scenarios"""
+    health_check_client = HealthCheckClient(region="us-east-1")
+    
+    # Test health check against non-existent function
+    health_config = {
+        "enabled": True,
+        "payload": "{\"test\": \"data\"}",
+        "timeoutSeconds": 5
+    }
+    result = health_check_client.perform_health_check("non-existent-function", "1", health_config)
+    assert result is False
+
+
+@mock_aws
+def test_notification_client():
+    """Test SNS notification functionality"""
+    sns_client = boto3.client("sns", region_name="us-east-1")
+    
+    # Create a test topic
+    topic_response = sns_client.create_topic(Name="test-deployment-failures")
+    topic_arn = topic_response["TopicArn"]
+    
+    notification_client = NotificationClient(region="us-east-1", sns_topic_arn=topic_arn)
+    
+    # Test successful notification
+    result = notification_client.send_deployment_failure_notification(
+        function_name="test-function",
+        failure_type="health_check",
+        error_details="Health check failed",
+        deployment_context={"version": "2", "action": "rollback"}
+    )
+    assert result is True
+
+
+def test_notification_client_no_topic():
+    """Test notification client without SNS topic configured"""
+    notification_client = NotificationClient(region="us-east-1", sns_topic_arn=None)
+    
+    # Should return False but not error
+    result = notification_client.send_deployment_failure_notification(
+        function_name="test-function",
+        failure_type="health_check",
+        error_details="Health check failed"
+    )
+    assert result is False
+

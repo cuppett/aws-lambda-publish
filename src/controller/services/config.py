@@ -9,3 +9,6 @@ class Config:
         self.default_update_strategy = os.environ.get("DEFAULT_UPDATE_STRATEGY", "publish-and-alias")
         self.metrics_namespace = os.environ.get("METRICS_NAMESPACE", "LambdaPublish")
         self.log_level = os.environ.get("LOG_LEVEL", "INFO")
+        self.scan_severity_threshold = os.environ.get("SCAN_SEVERITY_THRESHOLD", "HIGH")
+        self.sns_topic_arn = os.environ.get("SNS_TOPIC_ARN")
+        self.default_health_check_timeout = int(os.environ.get("DEFAULT_HEALTH_CHECK_TIMEOUT", "10"))
