@@ -12,33 +12,58 @@ class LambdaClient:
                                 aws_session_token=(credentials.get('SessionToken') if credentials else None))
         self.client = session.client('lambda')
 
+    def get_architecture(self, function_name):
+        try:
+            cfg = self.client.get_function_configuration(FunctionName=function_name)
+            archs = cfg.get('Architectures') or []
+            return archs[0] if archs else None
+        except Exception as e:
+            logger.warning(f"Failed to get architecture for {function_name}: {e}")
+            return None
+
+    @staticmethod
+    def resolve_image_tag(image_tag, architecture):
+        if not architecture or not image_tag:
+            return image_tag
+        if image_tag.endswith(('-amd64', '-aarch64')):
+            return image_tag
+        suffix = 'aarch64' if architecture == 'arm64' else 'amd64'
+        return f"{image_tag}-{suffix}"
+
+    def resolve_target_image(self, function_name, repository, image_tag, registry_id, region):
+        architecture = self.get_architecture(function_name)
+        resolved_tag = self.resolve_image_tag(image_tag, architecture)
+        from .ecr_client import ECRClient
+        ecr_client = ECRClient(region=region)
+        digest = ecr_client.get_digest(repository, resolved_tag, registry_id)
+        image_uri = f"{registry_id}.dkr.ecr.{region}.amazonaws.com/{repository}:{resolved_tag}"
+        return image_uri, digest, resolved_tag, architecture
+
+    def _get_image_uri(self, function_name):
+        try:
+            cfg = self.client.get_function_configuration(FunctionName=function_name)
+            if cfg.get('PackageType') != 'Image':
+                return None
+            uri = cfg.get('Code', {}).get('ImageUri') if isinstance(cfg.get('Code'), dict) else None
+            if uri:
+                return uri
+            func_resp = self.client.get_function(FunctionName=function_name)
+            return func_resp.get('Code', {}).get('ImageUri')
+        except Exception as e:
+            logger.warning(f"Failed to get image URI for {function_name}: {e}")
+            return None
+
     def get_current_image_digest(self, function_name):
         try:
-            # Try GetFunctionConfiguration first
-            cfg = self.client.get_function_configuration(FunctionName=function_name)
-            
-            # Check if it's a container image function
-            if cfg.get('PackageType') != 'Image':
-                logger.debug(f"Function {function_name} is not a container image function")
-                return None
-            
-            # Try to get ImageUri from Code field
-            uri = cfg.get('Code', {}).get('ImageUri') if isinstance(cfg.get('Code'), dict) else None
-            
+            uri = self._get_image_uri(function_name)
             if not uri:
-                # Fall back to GetFunction if ImageUri not in configuration
-                try:
-                    func_resp = self.client.get_function(FunctionName=function_name)
-                    uri = func_resp.get('Code', {}).get('ImageUri')
-                except Exception as e:
-                    logger.warning(f"Failed to get function details for {function_name}: {e}")
-                    return None
-            
-            if uri and '@' in uri:
+                return None
+
+            if '@' in uri:
                 digest = uri.split('@', 1)[1]
                 logger.debug(f"Current digest for {function_name}: {digest}")
                 return digest
-            elif uri and ':' in uri:
+            elif ':' in uri:
                 # Handle tag-based URIs by resolving via ECR
                 logger.info(f"Function {function_name} uses tag-based URI: {uri}")
                 try:
@@ -79,22 +104,29 @@ class LambdaClient:
             logger.exception(f"Failed to get current image digest for {function_name}: {e}")
             return None
 
-    def update_function_direct(self, function_name, image_uri, alias_name=None, update_strategy="publish-and-alias"):
+    def update_function_direct(self, function_name, image_uri, alias_name=None, update_strategy="publish-and-alias", target_digest=None):
         try:
+            deployed_uri = self._get_image_uri(function_name)
+            tag_based = bool(deployed_uri and '@' not in deployed_uri)
+
+            if '@' in image_uri:
+                new_digest = image_uri.split('@', 1)[1]
+            elif target_digest:
+                new_digest = target_digest
+            else:
+                logger.error(f"Cannot determine target digest for function {function_name}")
+                return {"function": function_name, "status": "error", "error": "Missing target digest"}
+
             cur = self.get_current_image_digest(function_name)
             
-            if '@' not in image_uri:
-                logger.error(f"Invalid image URI format (missing digest): {image_uri}")
-                return {"function": function_name, "status": "error", "error": "Invalid image URI format"}
-            
-            new_digest = image_uri.split('@', 1)[1]
-            
-            # Check if update is needed
-            if cur is not None and cur == new_digest:
+            # Tag-based Lambda URIs do not track ECR tag moves; resolving the tag
+            # via ECR always matches the incoming push digest even when Lambda has
+            # not pulled the new image yet.
+            if cur is not None and cur == new_digest and not tag_based:
                 logger.info(f"Function {function_name} already at digest {new_digest}")
                 return {"function": function_name, "status": "noop", "current_digest": cur}
             
-            logger.info(f"Updating function {function_name} from {cur} to {new_digest}")
+            logger.info(f"Updating function {function_name} to {image_uri} (digest {new_digest})")
             
             # Update function code
             resp = self.client.update_function_code(FunctionName=function_name, ImageUri=image_uri, Publish=False)
@@ -124,7 +156,15 @@ class LambdaClient:
             
             # Handle different update strategies
             version = None
-            
+
+            if update_strategy in ("code-only", "update-only"):
+                return {
+                    "function": function_name,
+                    "status": "updated",
+                    "new_digest": new_digest,
+                    "previous_digest": cur,
+                }
+
             if update_strategy in ("publish-and-alias", "publish-only"):
                 # Publish new version
                 logger.info(f"Publishing new version for function {function_name}")

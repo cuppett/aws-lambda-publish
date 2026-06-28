@@ -79,6 +79,48 @@ def test_ecr_get_digest_uses_registry_and_retries():
 
 
 @mock_aws
+def test_resolve_image_tag_for_lambda_architecture():
+    lc = LambdaClient(region='us-east-1')
+    assert lc.resolve_image_tag('latest', 'arm64') == 'latest-aarch64'
+    assert lc.resolve_image_tag('latest', 'x86_64') == 'latest-amd64'
+    assert lc.resolve_image_tag('latest-aarch64', 'arm64') == 'latest-aarch64'
+
+
+@mock_aws
+def test_lambda_client_updates_tag_based_uri_even_when_digest_matches():
+    session = boto3.Session(region_name='us-east-1')
+    lc = LambdaClient(region='us-east-1')
+    from botocore.stub import Stubber
+    stubber = Stubber(lc.client)
+
+    tag_uri = '771294529343.dkr.ecr.us-east-1.amazonaws.com/ddns-route53:latest'
+    digest = 'sha256:new'
+
+    stubber.add_response('get_function_configuration', {
+        'FunctionName': 'ddns-update-handler', 'PackageType': 'Image'
+    }, {'FunctionName': 'ddns-update-handler'})
+    stubber.add_response('get_function', {
+        'Code': {'ImageUri': tag_uri}
+    }, {'FunctionName': 'ddns-update-handler'})
+    stubber.add_response('get_function_configuration', {
+        'FunctionName': 'ddns-update-handler', 'PackageType': 'Image'
+    }, {'FunctionName': 'ddns-update-handler'})
+    stubber.add_response('get_function', {
+        'Code': {'ImageUri': tag_uri}
+    }, {'FunctionName': 'ddns-update-handler'})
+    stubber.add_response('update_function_code', {
+        'FunctionName': 'ddns-update-handler'
+    }, {'FunctionName': 'ddns-update-handler', 'ImageUri': tag_uri, 'Publish': False})
+    stubber.add_response('get_function_configuration', {
+        'FunctionName': 'ddns-update-handler', 'LastUpdateStatus': 'Successful', 'PackageType': 'Image'
+    }, {'FunctionName': 'ddns-update-handler'})
+
+    with stubber:
+        res = lc.update_function_direct('ddns-update-handler', tag_uri, update_strategy='code-only', target_digest=digest)
+        assert res['status'] == 'updated'
+
+
+@mock_aws
 def test_lambda_client_noop_vs_update():
     # Create lambda function with container image requires ECR etc.; moto's support is limited
     # We'll mock get_function_configuration and subsequent calls using botocore Stubber

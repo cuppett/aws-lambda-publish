@@ -22,7 +22,7 @@ Resources:
     Properties:
       FunctionName: lambda-publish-controller
       Handler: src.controller.lambda_handler.handler
-      CodeUri: .
+      CodeUri: build/lambda
       Policies:
         - DynamoDBCrudPolicy:
             TableName: ImageTagSubscriptions
@@ -33,6 +33,7 @@ Resources:
               Resource: '*'
             - Effect: Allow
               Action:
+                - lambda:GetFunction
                 - lambda:GetFunctionConfiguration
                 - lambda:UpdateFunctionCode
                 - lambda:PublishVersion
@@ -95,7 +96,7 @@ Resources:
     Properties:
       FunctionName: lambda-publish-monitor
       Handler: src.monitor.lambda_handler.handler
-      CodeUri: .
+      CodeUri: build/lambda
       Policies:
         - DynamoDBCrudPolicy:
             TableName: ImageTagSubscriptions

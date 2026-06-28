@@ -4,7 +4,7 @@ Controller that detects ECR tag pushes and updates Lambda container image functi
 
 ## Structure
 - src/controller - controller lambda
-- src/monitor - monitor lambda (placeholder)
+- src/monitor - monitor lambda (pipeline mode status polling)
 - infra - CloudFormation templates (core, pipeline, spoke roles)
 - tests - unit tests (pytest + moto)
 - template.yaml - SAM template for controller + table + monitor

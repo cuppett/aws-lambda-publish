@@ -66,7 +66,7 @@ def handler(event, context):
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = {}
             for t in targets:
-                futures[ex.submit(process_target, t, repository, digest, registry_id, region, pk, correlation_id, metrics)] = t
+                futures[ex.submit(process_target, t, repository, image_tag, digest, registry_id, region, pk, correlation_id, metrics)] = t
             for fut in as_completed(futures):
                 try:
                     res = fut.result()
@@ -94,14 +94,16 @@ def handler(event, context):
         return {"status": "error", "error": str(e)}
 
 
-def process_target(target_item, repository, digest, registry_id, hub_region, pk, correlation_id, metrics):
+def process_target(target_item, repository, image_tag, digest, registry_id, hub_region, pk, correlation_id, metrics):
     mode = target_item.get("mode") or config.default_mode
     target = target_item.get("target", {})
     region = target.get("region", hub_region)
     function_name = target.get("functionName")
     alias = target.get("aliasName")
-    assume_role = target_item.get("assumeRoleArn") or target.get("assumeRoleArn")
+    assume_role = target_item.get("assumeRoleArn")
+    update_strategy = target_item.get("updateStrategy") or config.default_update_strategy
     sk = target_item.get("SK") or f"{target.get('accountId', '')}/{region}/{function_name}"
+    function_label = sk.rsplit("/", 1)[-1]
 
     logger.info(json.dumps({
         "msg": "processing_target",
@@ -117,28 +119,39 @@ def process_target(target_item, repository, digest, registry_id, hub_region, pk,
             sts = STSClient()
             creds = sts.assume_role(assume_role, session_name=config.assume_role_session_name)
 
-        image_uri = f"{registry_id}.dkr.ecr.{region}.amazonaws.com/{repository}@{digest}"
-
         if mode == "direct":
             lc = LambdaClient(region=region, credentials=creds)
-            new_digest = image_uri.split('@', 1)[1]
+            image_uri, target_digest, resolved_tag, architecture = lc.resolve_target_image(
+                function_name, repository, image_tag, registry_id, region
+            )
+            if not target_digest:
+                logger.error(json.dumps({
+                    "msg": "missing_target_digest",
+                    "correlationId": correlation_id,
+                    "function": function_name,
+                    "tag": resolved_tag,
+                }))
+                return {"function": function_name, "status": "error", "error": f"No digest for tag {resolved_tag}"}
             
             # Idempotency check
-            ok = ddb_conditional_set(pk, sk, new_digest, region)
+            ok = ddb_conditional_set(pk, sk, target_digest, region)
             if not ok:
                 logger.info(json.dumps({
                     "msg": "skipping_already_processed",
                     "correlationId": correlation_id,
                     "function": function_name,
-                    "digest": new_digest
+                    "digest": target_digest,
+                    "tag": resolved_tag,
                 }))
-                metrics.record_updated_function(repository, sk.split('#')[-1], mode, "noop-idempotent")
+                metrics.record_updated_function(repository, function_label, mode, "noop-idempotent")
                 return {"function": function_name, "status": "noop-idempotent"}
             
-            res = with_retries(lambda: lc.update_function_direct(function_name, image_uri, alias, config.default_update_strategy))
+            res = with_retries(lambda: lc.update_function_direct(
+                function_name, image_uri, alias, update_strategy, target_digest
+            ))
             status = res.get("status")
-            DDBClient(table_name=config.table_name, region=region).update_last_processed(pk, sk, new_digest, status)
-            metrics.record_updated_function(repository, sk.split('#')[-1], mode, status)
+            DDBClient(table_name=config.table_name, region=region).update_last_processed(pk, sk, target_digest, status)
+            metrics.record_updated_function(repository, function_label, mode, status)
             return res
         else:
             pc = PipelineClient(region=region, credentials=creds)
@@ -153,8 +166,9 @@ def process_target(target_item, repository, digest, registry_id, hub_region, pk,
                 }))
                 return {"function": function_name, "status": "error", "error": "missing pipeline name"}
             
+            digest_uri = f"{registry_id}.dkr.ecr.{region}.amazonaws.com/{repository}@{digest}"
             vars = {
-                "IMAGE_URI": image_uri,
+                "IMAGE_URI": digest_uri,
                 "FUNCTION_NAME": function_name or "",
                 "ALIAS_NAME": alias or "",
                 "DEPLOY_APP": (target_item.get("codeDeploy") or target.get("codeDeploy") or {}).get("applicationName", ""),
@@ -165,7 +179,7 @@ def process_target(target_item, repository, digest, registry_id, hub_region, pk,
             execution_id = res.get("executionId")
             status = res.get("status", "unknown")
             DDBClient(table_name=config.table_name, region=region).record_pipeline_execution(pk, sk, execution_id or "", status)
-            metrics.record_pipeline_start(repository, sk.split('#')[-1], status)
+            metrics.record_pipeline_start(repository, function_label, status)
             return res
     except Exception as e:
         logger.exception(f"Failed to process target {function_name}")
