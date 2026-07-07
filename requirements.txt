@@ -1,4 +1,4 @@
 boto3==1.34.162
 botocore==1.34.162
-pytest==8.3.2
+pytest==9.0.3
 moto==5.0.11
