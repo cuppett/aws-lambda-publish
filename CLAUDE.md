@@ -142,6 +142,15 @@ This is critical for idempotency checks when Lambda functions use tag-based Imag
 ### Idempotency
 Uses DynamoDB conditional updates: `SET lastProcessedDigest = :d, lastStatus = in-progress IF attribute_not_exists OR <> :d OR lastStatus = error`. A failed update (or an exception mid-update) leaves `lastStatus = error`, so redelivery/re-push of the same digest is retried instead of being skipped forever.
 
+### Error alerting
+`template.yaml` creates CloudWatch Logs metric filters on both function log groups
+(`?"[ERROR]" ?"Task timed out"` -> `LambdaPublish/ControllerLogErrors`, `MonitorLogErrors`)
+and alarms `<stack>-controller-errors` / `<stack>-monitor-errors` (Sum >= 1 over 60s,
+missing data = OK, so each failure burst re-notifies). Parameter `AlertTopicArn`
+(default `alert_steve`; empty string = alarms without notifications). The topic's
+policy must let the account / `cloudwatch.amazonaws.com` publish; no IAM role is
+involved. Anything logged at ERROR pages, so keep expected conditions at INFO/WARNING.
+
 ### Registry/account ID
 ECR `ECR Image Action` events do NOT include `registry-id` in `detail`; the account is the envelope `account` field. The controller uses `detail.registry-id` or falls back to `event.account`. Never build an image URI without it (the old code produced `None.dkr.ecr...` and every direct update failed).
 

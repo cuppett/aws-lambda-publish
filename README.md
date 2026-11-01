@@ -21,3 +21,12 @@ Prereqs: AWS SAM CLI, AWS CLI, AWS profile set.
 Then add a subscription item to DynamoDB and push an image to ECR to trigger.
 
 See DESIGN.md for architecture.
+
+## Error alerts
+
+The stack adds CloudWatch Logs metric filters on the controller and monitor log
+groups (`[ERROR]` lines and Lambda timeouts) with alarms
+`lambda-publish-core-controller-errors` / `-monitor-errors`. Set the
+`AlertTopicArn` parameter to an SNS topic to be notified (default
+`arn:aws:sns:us-east-1:771294529343:alert_steve`; empty string disables
+notifications).

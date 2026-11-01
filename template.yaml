@@ -1,6 +1,20 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: SAM template for aws-lambda-publish
+
+Parameters:
+  AlertTopicArn:
+    Type: String
+    Default: arn:aws:sns:us-east-1:771294529343:alert_steve
+    Description: >-
+      SNS topic notified when the controller or monitor logs an error (failed
+      updates, timeouts, crashes). Set to an empty string to create the alarms
+      without notifications. Must be an unencrypted or CloudWatch-usable-KMS
+      topic whose policy lets this account (or cloudwatch.amazonaws.com) publish.
+
+Conditions:
+  HasAlertTopic: !Not [!Equals [!Ref AlertTopicArn, '']]
+
 Globals:
   Function:
     Timeout: 300
@@ -127,8 +141,76 @@ Resources:
             Schedule: rate(5 minutes)
             Name: monitor-pipeline-status
 
+  # --- Error alerting: CloudWatch Logs metric filters -> alarms -> optional SNS ---
+  # Matches Python runtime "[ERROR]" lines (logger.error/exception, uncaught
+  # exceptions, init failures) and Lambda "Task timed out" lines.
+  ControllerErrorMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ControllerFunction}'
+      FilterPattern: '?"[ERROR]" ?"Task timed out"'
+      MetricTransformations:
+        - MetricNamespace: LambdaPublish
+          MetricName: ControllerLogErrors
+          MetricValue: '1'
+          Unit: Count
+
+  MonitorErrorMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${MonitorFunction}'
+      FilterPattern: '?"[ERROR]" ?"Task timed out"'
+      MetricTransformations:
+        - MetricNamespace: LambdaPublish
+          MetricName: MonitorLogErrors
+          MetricValue: '1'
+          Unit: Count
+
+  # 1-minute period with missing data = OK, so each burst of failures goes
+  # OK -> ALARM and notifies again (an alarm stuck in ALARM would not).
+  ControllerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: ControllerErrorMetricFilter
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-controller-errors'
+      AlarmDescription: !Sub >-
+        lambda-publish controller logged an error (a Lambda image update
+        probably failed). Logs: /aws/lambda/${ControllerFunction}. Check the
+        ImageTagSubscriptions items with lastStatus=error.
+      Namespace: LambdaPublish
+      MetricName: ControllerLogErrors
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlertTopic, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
+
+  MonitorErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: MonitorErrorMetricFilter
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-monitor-errors'
+      AlarmDescription: !Sub >-
+        lambda-publish monitor logged an error while tracking pipeline-mode
+        deployments. Logs: /aws/lambda/${MonitorFunction}.
+      Namespace: LambdaPublish
+      MetricName: MonitorLogErrors
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlertTopic, [!Ref AlertTopicArn], !Ref 'AWS::NoValue']
+
 Outputs:
   ControllerFunctionName:
     Value: !Ref ControllerFunction
   TableName:
     Value: !Ref ImageTagSubscriptionsTable
+  ControllerErrorAlarmName:
+    Value: !Ref ControllerErrorAlarm
+  MonitorErrorAlarmName:
+    Value: !Ref MonitorErrorAlarm
