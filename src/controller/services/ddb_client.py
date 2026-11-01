@@ -80,17 +80,37 @@ class DDBClient:
             return False
 
     def conditional_set_processed(self, pk: str, sk: str, new_digest: str) -> bool:
+        """Claim a digest for processing.
+
+        Succeeds when the digest is new, or when the previous attempt for the same
+        digest failed (lastStatus = error), so failures are retryable rather than
+        permanently recorded as processed.
+        """
         try:
             self.client.update_item(
                 TableName=self.table,
                 Key={'PK': {'S': pk}, 'SK': {'S': sk}},
-                UpdateExpression='SET lastProcessedDigest = :d',
-                ConditionExpression='attribute_not_exists(lastProcessedDigest) OR lastProcessedDigest <> :d',
-                ExpressionAttributeValues={':d': {'S': new_digest}}
+                UpdateExpression='SET lastProcessedDigest = :d, lastStatus = :p',
+                ConditionExpression=('attribute_not_exists(lastProcessedDigest) OR lastProcessedDigest <> :d '
+                                     'OR lastStatus = :e'),
+                ExpressionAttributeValues={':d': {'S': new_digest}, ':p': {'S': 'in-progress'},
+                                           ':e': {'S': 'error'}}
             )
             return True
         except self.client.exceptions.ConditionalCheckFailedException:
             return False
+        except Exception:
+            return False
+
+    def mark_status(self, pk: str, sk: str, status: str) -> bool:
+        try:
+            self.client.update_item(
+                TableName=self.table,
+                Key={'PK': {'S': pk}, 'SK': {'S': sk}},
+                UpdateExpression='SET lastStatus = :s',
+                ExpressionAttributeValues={':s': {'S': status}}
+            )
+            return True
         except Exception:
             return False
 

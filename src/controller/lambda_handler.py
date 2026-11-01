@@ -39,11 +39,19 @@ def handler(event, context):
                 image_tag = tags[0]
         
         if not repository or not image_tag:
-            logger.error(json.dumps({"msg": "missing repository or image tag", "correlationId": correlation_id}))
+            # Untagged pushes (e.g. per-arch manifests under a multi-arch index) are expected.
+            logger.info(json.dumps({"msg": "ignoring untagged or incomplete push", "correlationId": correlation_id,
+                                    "repository": repository}))
             metrics.increment_counter("InvalidEvents", {"Reason": "MissingRepoOrTag"})
             return {"status": "ignored"}
 
-        registry_id = detail.get("registry-id")
+        # ECR "Image Action" events carry the registry/account at the envelope level,
+        # not in detail. Never build an image URI without an account.
+        registry_id = detail.get("registry-id") or event.get("account")
+        if not registry_id:
+            logger.error(json.dumps({"msg": "missing registry/account id", "correlationId": correlation_id}))
+            metrics.increment_counter("InvalidEvents", {"Reason": "MissingAccount"})
+            return {"status": "error", "reason": "no_account"}
         region = os.environ.get("AWS_REGION")
 
         ecr = ECRClient(region=region)
@@ -184,6 +192,8 @@ def process_target(target_item, repository, image_tag, digest, registry_id, hub_
     except Exception as e:
         logger.exception(f"Failed to process target {function_name}")
         metrics.increment_counter("TargetProcessingErrors", {"Function": function_name, "Mode": mode})
+        # Mark the claim as failed so the same digest can be retried.
+        DDBClient(table_name=config.table_name, region=region).mark_status(pk, sk, "error")
         return {"function": function_name, "status": "error", "error": str(e)}
 
 

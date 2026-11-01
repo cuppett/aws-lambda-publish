@@ -132,7 +132,7 @@ class LambdaClient:
             resp = self.client.update_function_code(FunctionName=function_name, ImageUri=image_uri, Publish=False)
             
             # Wait for update to complete
-            max_wait_time = 300  # 5 minutes
+            max_wait_time = 240  # must stay under the function Timeout (300s)
             wait_interval = 2
             waited = 0
             

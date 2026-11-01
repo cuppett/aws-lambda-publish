@@ -3,8 +3,8 @@ Transform: AWS::Serverless-2016-10-31
 Description: SAM template for aws-lambda-publish
 Globals:
   Function:
-    Timeout: 120
-    Runtime: python3.13
+    Timeout: 300
+    Runtime: python3.14
     MemorySize: 512
     Environment:
       Variables:

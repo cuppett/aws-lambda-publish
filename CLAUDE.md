@@ -10,7 +10,7 @@ aws-lambda-publish is an AWS Lambda-based system that automatically detects ECR 
 
 ### Setup and Testing
 ```bash
-make install          # Install Python dependencies
+make install          # Install runtime + dev deps (requirements-dev.txt); Python 3.14
 make test             # Run unit tests with pytest + moto
 pytest tests/test_services.py::test_ddb_marshalling_and_idempotency  # Run single test
 ```
@@ -140,7 +140,10 @@ The `LambdaClient.get_current_image_digest()` method handles both:
 This is critical for idempotency checks when Lambda functions use tag-based ImageURIs instead of digest-based ones.
 
 ### Idempotency
-Uses DynamoDB conditional updates: `SET lastProcessedDigest = :d IF attribute_not_exists OR <> :d`
+Uses DynamoDB conditional updates: `SET lastProcessedDigest = :d, lastStatus = in-progress IF attribute_not_exists OR <> :d OR lastStatus = error`. A failed update (or an exception mid-update) leaves `lastStatus = error`, so redelivery/re-push of the same digest is retried instead of being skipped forever.
+
+### Registry/account ID
+ECR `ECR Image Action` events do NOT include `registry-id` in `detail`; the account is the envelope `account` field. The controller uses `detail.registry-id` or falls back to `event.account`. Never build an image URI without it (the old code produced `None.dkr.ecr...` and every direct update failed).
 
 ### Pipeline Variable Propagation  
 SSM Parameter Store strategy stores variables at `/lambda-publish/pipeline/{name}/{executionId}/` for CodeBuild access

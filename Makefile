@@ -5,22 +5,23 @@ REGION ?= us-east-1
 SAM ?= sam
 STACK ?= lambda-publish-core
 ARTIFACT_BUCKET ?= fedora-builds-pipelinebucket-uueu3sxbscop
-PYTHON ?= python3
+PYTHON ?= python3.14
 
 install:
-	$(PYTHON) -m pip install -r requirements.txt
+	$(PYTHON) -m pip install -r requirements-dev.txt
 
 lint:
 	echo "No linter configured yet"
 
 test:
-	pytest -q
+	$(PYTHON) -m pytest -q
 
 build-artifact:
 	rm -rf build/lambda
 	mkdir -p build/lambda
 	$(PYTHON) -m pip install -q -r requirements.txt -t build/lambda
 	cp -r src build/lambda/
+	find build/lambda -name __pycache__ -type d -prune -exec rm -rf {} +
 
 build: build-artifact
 

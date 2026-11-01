@@ -162,3 +162,99 @@ def test_lambda_client_noop_vs_update():
         res = lc.update_function_direct('orders-fn', '123.dkr.ecr.us-east-1.amazonaws.com/orders@sha256:new', 'prod')
         assert res['status'] == 'updated'
         assert res['version'] == '2'
+
+
+
+ECR_PUSH_EVENT = {
+    # Real "ECR Image Action" shape: account is on the envelope, NOT in detail.
+    "version": "0",
+    "id": "evt-1",
+    "detail-type": "ECR Image Action",
+    "source": "aws.ecr",
+    "account": "123456789012",
+    "region": "us-east-1",
+    "detail": {
+        "result": "SUCCESS",
+        "repository-name": "ddns-route53",
+        "image-digest": "sha256:index",
+        "action-type": "PUSH",
+        "image-tag": "latest",
+    },
+}
+
+
+def _setup_hub(table='ImageTagSubscriptions'):
+    ddb = boto3.client('dynamodb', region_name='us-east-1')
+    ddb.create_table(
+        TableName=table,
+        BillingMode='PAY_PER_REQUEST',
+        AttributeDefinitions=[{'AttributeName': 'PK', 'AttributeType': 'S'}, {'AttributeName': 'SK', 'AttributeType': 'S'}],
+        KeySchema=[{'AttributeName': 'PK', 'KeyType': 'HASH'}, {'AttributeName': 'SK', 'KeyType': 'RANGE'}],
+    )
+    ddb.put_item(TableName=table, Item={
+        'PK': {'S': 'ddns-route53:latest'},
+        'SK': {'S': '123456789012/us-east-1/ddns-checkip'},
+        'mode': {'S': 'direct'},
+        'updateStrategy': {'S': 'code-only'},
+        'target': {'M': {'accountId': {'S': '123456789012'}, 'region': {'S': 'us-east-1'},
+                         'functionName': {'S': 'ddns-checkip'}}},
+    })
+    ecr = boto3.client('ecr', region_name='us-east-1')
+    ecr.create_repository(repositoryName='ddns-route53')
+    for tag, cfg in (('latest', 'sha256:i'), ('latest-aarch64', 'sha256:a')):
+        ecr.put_image(repositoryName='ddns-route53', imageTag=tag, imageManifest=json.dumps({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+            "config": {"mediaType": "application/vnd.docker.container.image.v1+json", "size": 1, "digest": cfg},
+            "layers": [],
+        }))
+    return ddb
+
+
+@mock_aws
+def test_handler_builds_uri_from_event_account(monkeypatch):
+    monkeypatch.setenv('AWS_REGION', 'us-east-1')
+    ddb = _setup_hub()
+    from src.controller import lambda_handler as lh
+    calls = []
+    monkeypatch.setattr(LambdaClient, 'get_architecture', lambda self, fn: 'arm64')
+
+    def fake_update(self, fn, image_uri, alias=None, strategy=None, digest=None):
+        calls.append(image_uri)
+        return {"function": fn, "status": "updated"}
+    monkeypatch.setattr(LambdaClient, 'update_function_direct', fake_update)
+
+    res = lh.handler(ECR_PUSH_EVENT, None)
+    assert res['status'] == 'done'
+    assert calls == ['123456789012.dkr.ecr.us-east-1.amazonaws.com/ddns-route53:latest-aarch64']
+    assert not any(c.startswith('None.') for c in calls)
+    item = ddb.get_item(TableName='ImageTagSubscriptions', Key={
+        'PK': {'S': 'ddns-route53:latest'}, 'SK': {'S': '123456789012/us-east-1/ddns-checkip'}})['Item']
+    assert item['lastStatus']['S'] == 'updated'
+
+
+@mock_aws
+def test_handler_retries_same_digest_after_error(monkeypatch):
+    monkeypatch.setenv('AWS_REGION', 'us-east-1')
+    _setup_hub()
+    from src.controller import lambda_handler as lh
+    monkeypatch.setattr(LambdaClient, 'get_architecture', lambda self, fn: 'arm64')
+    outcomes = iter([{"status": "error"}, {"status": "updated"}, None])
+
+    def fake_update(self, fn, image_uri, alias=None, strategy=None, digest=None):
+        r = next(outcomes)
+        assert r is not None, "third delivery must be skipped as idempotent"
+        return {"function": fn, **r}
+    monkeypatch.setattr(LambdaClient, 'update_function_direct', fake_update)
+
+    assert lh.handler(ECR_PUSH_EVENT, None)['results'][0]['status'] == 'error'
+    assert lh.handler(ECR_PUSH_EVENT, None)['results'][0]['status'] == 'updated'
+    assert lh.handler(ECR_PUSH_EVENT, None)['results'][0]['status'] == 'noop-idempotent'
+
+
+def test_handler_ignores_untagged_push(monkeypatch):
+    monkeypatch.setenv('AWS_REGION', 'us-east-1')
+    from src.controller import lambda_handler as lh
+    monkeypatch.setattr(lh, 'MetricsClient', lambda **kw: type('M', (), {'increment_counter': lambda *a, **k: None})())
+    ev = {**ECR_PUSH_EVENT, "detail": {k: v for k, v in ECR_PUSH_EVENT["detail"].items() if k != "image-tag"}}
+    assert lh.handler(ev, None) == {"status": "ignored"}

@@ -88,7 +88,7 @@ Environment variables:
 - ASSUME_ROLE_SESSION_NAME
 
 Steps per invocation:
-1. Validate EventBridge event: extract registryId, repositoryName, imageTag.
+1. Validate EventBridge event: extract repositoryName, imageTag, and registryId (detail.registry-id, else the envelope `account`). Untagged pushes are ignored at INFO.
 2. Resolve tag to digest via ECR DescribeImages. Choose most recent by imagePushedAt.
 3. Compute PK and query DynamoDB for subscription items.
 4. For each target item (parallel up to MAX_PARALLEL_TARGETS):
@@ -107,7 +107,7 @@ Steps per invocation:
 6. Return comprehensive results including target count and processing time.
 
 Idempotency:
-- Before performing an update, perform a conditional update (SET lastProcessedDigest = :d IF attribute_not_exists OR <> :d). If condition fails, skip work (noop-idempotent).
+- Before performing an update, claim the digest with a conditional update (SET lastProcessedDigest = :d, lastStatus = in-progress IF attribute_not_exists OR <> :d OR lastStatus = error). If the condition fails, skip work (noop-idempotent). Failed attempts record lastStatus = error so the same digest remains retryable.
 - After success, update lastProcessedDigest and lastStatus.
 
 Retries and throttling:
@@ -177,7 +177,7 @@ Deployment order:
 
 - Unit tests (pytest + moto) included: ECR digest, DynamoDB marshalling/idempotency, Lambda direct update flow via stubber.
 - End-to-end testing: Complete circuit tested with real ECR repository, Lambda function, and DynamoDB subscriptions in AWS account 771294529343/us-west-2.
-- Build pipeline: SAM build/deploy tested and working with Python 3.13 runtime.
+- Build pipeline: SAM build/deploy tested and working with Python 3.14 runtime.
 
 ## Operational runbook (brief)
 
@@ -208,7 +208,7 @@ All major components have been implemented and tested:
 - CloudWatch metrics emission from controller/monitor with comprehensive error tracking
 - Enhanced IAM permissions for ECR, SSM Parameter Store, and cross-account access
 - Unit tests with pytest + moto and end-to-end testing in AWS
-- SAM build/deploy pipeline with Python 3.13 runtime
+- SAM build/deploy pipeline with Python 3.14 runtime
 
 ## Future Enhancements
 

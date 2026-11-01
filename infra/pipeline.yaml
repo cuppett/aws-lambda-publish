@@ -83,7 +83,7 @@ Resources:
         Name: lambda-prep-artifacts
       Environment:
         ComputeType: BUILD_GENERAL1_SMALL
-        Image: aws/codebuild/standard:7.0
+        Image: aws/codebuild/standard:8.0
         Type: LINUX_CONTAINER
       Source:
         Type: NO_SOURCE
@@ -92,7 +92,7 @@ Resources:
           phases:
             install:
               runtime-versions:
-                python: 3.12
+                python: 3.14
             pre_build:
               commands:
                 - echo "Retrieving pipeline variables from Parameter Store"
